@@ -121,6 +121,46 @@ All LLM tests use a fake provider, so they make no network calls.
 
 Frontend: `cd frontend && npm run build` (type-checks and builds) and `npm run lint`.
 
+## Deploying (Railway or any Docker host)
+
+The root `Dockerfile` builds the React app and serves it from the FastAPI backend, so one service hosts both the website (`/`) and the API (`/api`). On start it runs `alembic upgrade head`, then listens on `$PORT`. `railway.json` tells Railway to use the Dockerfile, with `/api/health` as the health check.
+
+1. In Railway, create a project from the GitHub repo. It detects `railway.json` and builds the Dockerfile.
+2. Add a **PostgreSQL** database to the project. SQLite inside a container is wiped on every redeploy.
+3. Set these variables on the app service:
+
+| Variable | Value |
+|---|---|
+| `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` (Railway reference; `postgres://` URLs are converted automatically) |
+| `JWT_SECRET` | a long random string |
+| `GROQ_API_KEY` / `MODEL` | your Groq key and model |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` / `ADMIN_NAME` | the first admin login, created only while the database has no users |
+
+4. Deploy and open the generated domain. Log in as the admin, then add people and teams under **People & teams**.
+
+Reaching `{"detail":"Not Found"}` at `/` means the website build isn't being served, usually because the service was built from the `backend` folder instead of the repo root with the Dockerfile.
+
+## Deploying on Vercel (two projects from the same repo)
+
+Vercel runs the backend as a serverless function. It can't store files (so no SQLite) and can't run a background timer (so reminders use a Cron Job).
+
+**1. Backend project.** Import the repo, set **Root Directory = `backend`**. Vercel detects FastAPI in `app/main.py`. Each build runs `alembic upgrade head` (`[tool.vercel.scripts]` in `pyproject.toml`), and `backend/vercel.json` adds a daily cron at 14:00 UTC (19:30 IST). Add a Postgres database (Storage → Neon, or Supabase) and set:
+
+| Variable | Value |
+|---|---|
+| `DATABASE_URL` | the Postgres connection string (`postgres://` is converted automatically) |
+| `JWT_SECRET` | long random string |
+| `GROQ_API_KEY`, `MODEL` | Groq key and model |
+| `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `ADMIN_NAME` | first admin login, created only while the database is empty |
+| `CRON_SECRET` | random string; Vercel sends it to `/api/cron/automation` |
+| `CORS_ORIGINS` | the frontend URL, e.g. `https://teamtrack.vercel.app` |
+
+Visiting the backend URL itself shows `{"detail":"Not Found"}`; that's expected. Check `/api/health` instead.
+
+**2. Frontend project.** Import the same repo again, set **Root Directory = `frontend`** (Vite is detected). Set `VITE_API_URL` to the backend URL, e.g. `https://teamtrack-api.vercel.app`, then deploy. `frontend/vercel.json` makes page refreshes on routes like `/goals` load the app. Open this project's URL to use the app.
+
+Set environment variables before deploying, or redeploy after changing them. `VITE_API_URL` is built into the frontend.
+
 ## Production notes
 
 - Set a strong `JWT_SECRET` and a PostgreSQL `DATABASE_URL`, run `alembic upgrade head`, and serve `frontend/dist` behind the same origin, or set `CORS_ORIGINS`.

@@ -1,10 +1,17 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+
+def _serverless() -> bool:
+    """True on Vercel / AWS Lambda style runtimes, where no process stays alive between requests."""
+    markers = ("VERCEL", "VERCEL_ENV", "VERCEL_URL", "VERCEL_REGION", "AWS_LAMBDA_FUNCTION_NAME", "LAMBDA_TASK_ROOT")
+    return any(os.environ.get(m) for m in markers)
 
 
 class Settings(BaseSettings):
@@ -50,13 +57,35 @@ class Settings(BaseSettings):
     llm_use_server_fallbacks: bool = True
     anthropic_api_key: str | None = None
 
-    # Background scheduler (reminders, scheduled reports)
-    scheduler_enabled: bool = True
+    # Background scheduler (reminders, scheduled reports). Off on Vercel, where
+    # functions don't run continuously; a Vercel Cron Job calls /api/cron/automation.
+    scheduler_enabled: bool = Field(default_factory=lambda: not _serverless())
     scheduler_interval_minutes: int = 15
+    # Shared secret for the cron endpoint (Vercel sends "Authorization: Bearer <CRON_SECRET>")
+    cron_secret: str | None = None
 
     # Rate limits (requests per minute per user/IP)
     rate_limit_login_per_minute: int = 10
     rate_limit_ai_per_minute: int = 20
+
+    # Built React app served by this API (single-service deployment).
+    # Defaults to ../frontend/dist; the page is skipped if the folder doesn't exist.
+    frontend_dist: str = str(_BACKEND_DIR.parent / "frontend" / "dist")
+
+    # First admin account, created at startup only when the database has no users.
+    admin_email: str | None = None
+    admin_password: str | None = None
+    admin_name: str = "Admin"
+
+    @field_validator("database_url")
+    @classmethod
+    def _sqlalchemy_url(cls, v: str) -> str:
+        # Hosting providers (Railway, Heroku, Render) hand out postgres:// URLs;
+        # SQLAlchemy needs the driver named explicitly.
+        for prefix in ("postgres://", "postgresql://"):
+            if v.startswith(prefix):
+                return "postgresql+psycopg://" + v[len(prefix):]
+        return v
 
     @property
     def cors_origin_list(self) -> list[str]:

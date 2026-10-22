@@ -1,11 +1,13 @@
+import hmac
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.ai.provider import get_provider
+from app.config import get_settings
 from app.db import get_db
 from app.deps import can_manage_employee, ensure_can_view_employee, get_current_user, require_admin, visible_employee_ids
 from app.models import AuditLog, Notification, Role, TimeOff, User
@@ -134,6 +136,15 @@ def mark_all_read(user: User = Depends(get_current_user), db: Session = Depends(
 @router.post("/admin/run-automation")
 def trigger_automation(_: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Run reminders / deadline checks / scheduled report generation now."""
+    return run_automation(db)
+
+
+@router.get("/cron/automation", include_in_schema=False)
+def cron_automation(authorization: str | None = Header(None), db: Session = Depends(get_db)):
+    """Entry point for a platform scheduler (e.g. Vercel Cron Jobs) instead of the in-process scheduler."""
+    secret = get_settings().cron_secret
+    if not secret or not authorization or not hmac.compare_digest(authorization, f"Bearer {secret}"):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unauthorized")
     return run_automation(db)
 
 

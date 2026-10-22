@@ -108,3 +108,15 @@ def test_reminders_are_not_duplicated_and_respect_preferences(db, org, client):
     assert org.e2.id not in users and org.admin.id not in users
     early = run_automation(db, now.replace(hour=9))
     assert early["reminders"] == 0
+
+
+def test_cron_endpoint_requires_secret(client, org, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "cron_secret", None)
+    assert client.get("/api/cron/automation").status_code == 401  # disabled when no secret is configured
+    monkeypatch.setattr(get_settings(), "cron_secret", "s3cret")
+    assert client.get("/api/cron/automation").status_code == 401
+    assert client.get("/api/cron/automation", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    r = client.get("/api/cron/automation", headers={"Authorization": "Bearer s3cret"})
+    assert r.status_code == 200 and "reminders" in r.json()

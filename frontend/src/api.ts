@@ -1,5 +1,9 @@
 const TOKEN_KEY = 'teamtrack_token'
 
+// Same origin by default (Vite proxy locally, or the backend serving the app).
+// Set VITE_API_URL (e.g. https://my-backend.vercel.app) when the API runs on another domain.
+const API_BASE = `${(import.meta.env.VITE_API_URL ?? '').replace(/\/+$/, '')}/api`
+
 export function getToken(): string | null {
   try {
     return localStorage.getItem(TOKEN_KEY)
@@ -52,7 +56,7 @@ export async function api<T = unknown>(path: string, options: RequestInit & { js
   }
   let res: Response
   try {
-    res = await fetch(`/api${path}`, { ...options, headers, body })
+    res = await fetch(`${API_BASE}${path}`, { ...options, headers, body })
   } catch {
     throw new ApiError(0, 'Network error - is the API running?')
   }
@@ -69,7 +73,7 @@ export async function api<T = unknown>(path: string, options: RequestInit & { js
 
 export async function download(path: string) {
   const token = getToken()
-  const res = await fetch(`/api${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+  const res = await fetch(`${API_BASE}${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
   if (!res.ok) {
     const data = await res.json().catch(() => undefined)
     throw new ApiError(res.status, errorMessage(data, res.status))
