@@ -1,0 +1,162 @@
+from datetime import date
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, selectinload
+
+from app.db import get_db
+from app.deps import ai_rate_limit, ensure_can_view_employee, get_current_user, visible_employee_ids
+from app.models import AuditLog, DailyWorkLog, LogStatus, Role, User, WorkLogItem
+from app.schemas import (
+    AuditLogOut,
+    ChatMessageIn,
+    ConfirmIn,
+    DailyLogOut,
+    DraftOut,
+    Page,
+    ParseRequest,
+    WorkLogItemOut,
+    WorkLogItemUpdate,
+)
+from app.services import daily_updates as svc
+from app.utils import audit
+
+router = APIRouter(tags=["daily updates"])
+
+
+def _own_draft(db: Session, user: User, log_id: int) -> DailyWorkLog:
+    log = db.get(DailyWorkLog, log_id)
+    # Only the author can work on their own draft.
+    if log is None or log.employee_id != user.id:
+        raise HTTPException(404, "Not found")
+    return log
+
+
+def _log_q():
+    return select(DailyWorkLog).options(selectinload(DailyWorkLog.items), selectinload(DailyWorkLog.employee))
+
+
+@router.post("/daily-updates/parse", response_model=DraftOut, dependencies=[Depends(ai_rate_limit)])
+def parse_update(data: ParseRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Parse pasted text or the first chat message into an editable draft. Nothing is saved as work yet."""
+    log = svc.create_draft(db, user, data)
+    db.commit()
+    return svc.draft_out(db, log)
+
+
+@router.get("/daily-updates/drafts", response_model=list[DraftOut])
+def my_drafts(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logs = db.scalars(
+        select(DailyWorkLog)
+        .where(DailyWorkLog.employee_id == user.id, DailyWorkLog.status == LogStatus.draft)
+        .order_by(DailyWorkLog.id.desc())
+        .limit(10)
+    )
+    return [svc.draft_out(db, log) for log in logs]
+
+
+@router.get("/daily-updates/{log_id}/draft", response_model=DraftOut)
+def get_draft(log_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return svc.draft_out(db, _own_draft(db, user, log_id))
+
+
+@router.post("/daily-updates/{log_id}/chat", response_model=DraftOut, dependencies=[Depends(ai_rate_limit)])
+def chat(log_id: int, data: ChatMessageIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    log = svc.chat_turn(db, _own_draft(db, user, log_id), user, data.message)
+    db.commit()
+    return svc.draft_out(db, log)
+
+
+@router.put("/daily-updates/{log_id}/draft", response_model=DraftOut)
+def save_draft(log_id: int, data: ConfirmIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    log = svc.save_draft_edits(db, _own_draft(db, user, log_id), data.draft)
+    db.commit()
+    return svc.draft_out(db, log)
+
+
+@router.post("/daily-updates/{log_id}/confirm", response_model=DailyLogOut)
+def confirm(log_id: int, data: ConfirmIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    log = svc.confirm(db, _own_draft(db, user, log_id), user, data.draft)
+    db.commit()
+    return db.scalar(_log_q().where(DailyWorkLog.id == log.id))
+
+
+@router.post("/daily-updates/{log_id}/discard", status_code=204)
+def discard(log_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    log = _own_draft(db, user, log_id)
+    if log.status != LogStatus.draft:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only drafts can be discarded")
+    log.status = LogStatus.discarded
+    audit(db, user.id, "discard_draft", "daily_work_log", log.id)
+    db.commit()
+
+
+# ---------------------------------------------------------------- history
+
+
+@router.get("/work-logs", response_model=Page[DailyLogOut])
+def list_logs(
+    employee_id: int | None = None,
+    start: date | None = None,
+    end: date | None = None,
+    page: int = 1,
+    page_size: int = 30,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    page, page_size = max(1, page), min(max(1, page_size), 100)
+    q = _log_q().where(DailyWorkLog.status == LogStatus.confirmed)
+    if employee_id:
+        ensure_can_view_employee(db, user, employee_id)
+        q = q.where(DailyWorkLog.employee_id == employee_id)
+    else:
+        ids = visible_employee_ids(db, user)
+        if ids is not None:
+            q = q.where(DailyWorkLog.employee_id.in_(ids))
+    if start:
+        q = q.where(DailyWorkLog.report_date >= start)
+    if end:
+        q = q.where(DailyWorkLog.report_date <= end)
+    total = db.scalar(select(func.count()).select_from(q.subquery()))
+    rows = db.scalars(q.order_by(DailyWorkLog.report_date.desc(), DailyWorkLog.id.desc()).offset((page - 1) * page_size).limit(page_size))
+    return Page(items=list(rows), total=total, page=page, page_size=page_size)
+
+
+@router.get("/work-logs/{log_id}", response_model=DailyLogOut)
+def get_log(log_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    log = db.scalar(_log_q().where(DailyWorkLog.id == log_id))
+    if log is None or log.status == LogStatus.discarded:
+        raise HTTPException(404, "Not found")
+    ensure_can_view_employee(db, user, log.employee_id)
+    if log.status == LogStatus.draft and log.employee_id != user.id:
+        raise HTTPException(404, "Not found")
+    return log
+
+
+@router.get("/work-logs/{log_id}/history", response_model=list[AuditLogOut])
+def log_history(log_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    log = get_log(log_id, user, db)
+    item_ids = [i.id for i in log.items]
+    rows = db.scalars(
+        select(AuditLog)
+        .where(
+            ((AuditLog.entity_type == "daily_work_log") & (AuditLog.entity_id == log.id))
+            | ((AuditLog.entity_type == "work_log_item") & (AuditLog.entity_id.in_(item_ids or [-1])))
+        )
+        .order_by(AuditLog.id)
+    )
+    return list(rows)
+
+
+@router.patch("/work-log-items/{item_id}", response_model=WorkLogItemOut)
+def edit_item(item_id: int, data: WorkLogItemUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    item = db.get(WorkLogItem, item_id)
+    if item is None:
+        raise HTTPException(404, "Not found")
+    ensure_can_view_employee(db, user, item.employee_id)
+    if item.employee_id != user.id and user.role != Role.admin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the employee (or an admin) can edit their work log")
+    svc.update_item(db, item, data, user)
+    db.commit()
+    db.refresh(item)
+    return item

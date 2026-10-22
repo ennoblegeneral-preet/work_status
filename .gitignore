@@ -1,0 +1,58 @@
+# ---------------------------------------------------------------- secrets
+# Never commit real keys. Only the .env.example templates are tracked.
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+*.key
+
+# ---------------------------------------------------------------- Python (backend)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+
+# Local databases (SQLite dev DB holds real user data and password hashes)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# ---------------------------------------------------------------- Node (frontend)
+node_modules/
+dist/
+dist-ssr/
+*.tsbuildinfo
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------------------------------------------------------------- logs and exports
+logs/
+*.log
+# Reports downloaded while testing
+weekly-report-*.pdf
+weekly-report-*.xlsx
+weekly-report-*.md
+
+# ---------------------------------------------------------------- OS / editors
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.suo
