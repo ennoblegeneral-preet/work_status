@@ -2,7 +2,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -26,9 +26,10 @@ class Settings(BaseSettings):
     app_name: str = "TeamTrack AI"
     environment: str = "development"
 
-    # SQLite by default for local development; set to a Postgres URL in production,
-    # e.g. postgresql+psycopg://user:pass@host:5432/teamtrack
-    database_url: str = "sqlite:///./teamtrack.db"
+    # MongoDB connection string, e.g. mongodb+srv://user:pass@cluster0.xxxx.mongodb.net/teamtrack
+    # (MongoDB Atlas). The database name comes from MONGODB_DB, else the URI path, else "teamtrack".
+    mongodb_uri: str = "mongodb://localhost:27017"
+    mongodb_db: str | None = None
 
     # Auth
     jwt_secret: str = "dev-only-secret-change-me-in-production-0123456789"
@@ -76,16 +77,6 @@ class Settings(BaseSettings):
     admin_email: str | None = None
     admin_password: str | None = None
     admin_name: str = "Admin"
-
-    @field_validator("database_url")
-    @classmethod
-    def _sqlalchemy_url(cls, v: str) -> str:
-        # Hosting providers (Railway, Heroku, Render) hand out postgres:// URLs;
-        # SQLAlchemy needs the driver named explicitly.
-        for prefix in ("postgres://", "postgresql://"):
-            if v.startswith(prefix):
-                return "postgresql+psycopg://" + v[len(prefix):]
-        return v
 
     @property
     def cors_origin_list(self) -> list[str]:

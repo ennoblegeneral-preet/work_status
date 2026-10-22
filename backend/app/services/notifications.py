@@ -1,7 +1,4 @@
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
-
+from app.db import Session
 from app.models import Notification, Role, Team, TeamMember, User
 
 # notification type -> preference key (users can switch categories off)
@@ -37,25 +34,17 @@ def notify(
     """Create a notification once per dedupe_key. Returns True if created."""
     if not user.is_active or not wants(user, ntype):
         return False
-    if db.scalar(select(Notification.id).where(Notification.dedupe_key == dedupe_key)):
+    if db.exists(Notification, {"dedupe_key": dedupe_key}):
         return False
-    try:
-        with db.begin_nested():
-            db.add(Notification(user_id=user.id, type=ntype, title=title, body=body, link=link, dedupe_key=dedupe_key))
-    except IntegrityError:
-        return False
+    db.add(Notification(user_id=user.id, type=ntype, title=title, body=body, link=link, dedupe_key=dedupe_key))
     return True
 
 
 def managers_of(db: Session, employee_id: int) -> list[User]:
     """Managers of the employee's teams; admins when the employee has no manager."""
-    q = (
-        select(User)
-        .join(Team, Team.manager_id == User.id)
-        .join(TeamMember, TeamMember.team_id == Team.id)
-        .where(TeamMember.user_id == employee_id, User.is_active.is_(True), User.id != employee_id)
-    )
-    managers = list(dict.fromkeys(db.scalars(q)))
+    team_ids = [m.team_id for m in db.find(TeamMember, {"user_id": employee_id})]
+    manager_ids = {t.manager_id for t in db.find(Team, {"id": {"$in": team_ids}})} - {None, employee_id}
+    managers = db.find(User, {"id": {"$in": sorted(manager_ids)}, "is_active": True})
     if not managers:
-        managers = list(db.scalars(select(User).where(User.role == Role.admin, User.is_active.is_(True))))
+        managers = db.find(User, {"role": Role.admin, "is_active": True})
     return managers

@@ -5,22 +5,22 @@ Weekly goals, AI-assisted daily work updates and automatic weekly achievement re
 Admins and managers assign weekly goals. Employees paste their daily status (for example, from ChatGPT) or chat with the in-app assistant. The AI turns the text into structured work items linked to their goals, and the employee reviews them before saving. At the end of the week, individual and team reports are drafted from the stored records. Managers then review, edit, approve and export them.
 
 ```
-backend/    FastAPI + SQLAlchemy + Alembic + Claude API   (Python 3.11+)
+backend/    FastAPI + MongoDB (pymongo) + Groq / Claude API   (Python 3.11+)
 frontend/   React + TypeScript + Vite + Tailwind + TanStack Query
 docs/       reference-app feature study (Asana, ClickUp, Weekdone, Zoho People)
 ```
 
 ## Quick start (local)
 
-Requirements: Python 3.11+ with [uv](https://docs.astral.sh/uv/), Node 20+.
+Requirements: Python 3.11+ with [uv](https://docs.astral.sh/uv/), Node 20+, and a MongoDB database:
+a free [MongoDB Atlas](https://www.mongodb.com/atlas) cluster, or MongoDB running locally.
 
 ```bash
 # 1. Backend
 cd backend
-cp .env.example .env              # optional; add ANTHROPIC_API_KEY to enable AI
+cp .env.example .env              # set MONGODB_URI (and GROQ_API_KEY to enable AI)
 uv sync
-uv run alembic upgrade head       # create the database (SQLite by default)
-uv run python -m app.seed         # demo data (use --reset to recreate)
+uv run python -m app.seed         # demo data (use --reset to recreate); collections and indexes are created automatically
 uv run uvicorn app.main:app --reload --port 8000
 
 # 2. Frontend (new terminal)
@@ -96,7 +96,11 @@ Drafts are private to their author. Model output can only link work to the emplo
 
 ### Data model
 
-`users`, `teams`, `team_members`, `weekly_goals`, `tasks`, `daily_work_logs` (original text kept unchanged, plus the AI draft and the confirmed version), `work_log_items`, `task_status_history`, `goal_status_history`, `weekly_reports`, `report_reviews`, `notifications`, `audit_logs`, `time_off`, `org_settings`. The migration is in `backend/alembic/versions/`.
+MongoDB collections: `users`, `teams`, `team_members`, `weekly_goals`, `tasks`, `daily_work_logs` (original text kept unchanged, plus the AI draft and the confirmed version), `work_log_items`, `task_status_history`, `goal_status_history`, `weekly_reports`, `report_reviews`, `notifications`, `audit_logs`, `time_off`, `org_settings`.
+
+- **Ids:** every record has an integer `_id` from the `counters` collection, so codes like `G-12` and `T-40` stay short and stable.
+- **Indexes:** created automatically on first connection (`app/db.py`). That includes the unique ones: email, team name, team membership, one report per person/team per week, and notification dedupe keys.
+- **Saving:** `app/db.py` is a small unit-of-work layer. A request's changes are written together when it commits. A request that fails half-way writes nothing, and queries within a request see its own unsaved changes.
 
 ## Tests
 
@@ -104,7 +108,7 @@ Drafts are private to their author. Model output can only link work to the emplo
 cd backend && uv run pytest
 ```
 
-42 tests cover:
+47 tests cover:
 
 - auth and role permissions, and data isolation
 - goal assignment rules
@@ -117,21 +121,21 @@ cd backend && uv run pytest
 - missing-update calendar rules
 - reminder de-duplication and preferences
 
-All LLM tests use a fake provider, so they make no network calls.
+All LLM tests use a fake provider, and the database is an in-memory MongoDB ([mongomock](https://github.com/mongomock/mongomock)), so tests make no network calls.
 
 Frontend: `cd frontend && npm run build` (type-checks and builds) and `npm run lint`.
 
 ## Deploying (Railway or any Docker host)
 
-The root `Dockerfile` builds the React app and serves it from the FastAPI backend, so one service hosts both the website (`/`) and the API (`/api`). On start it runs `alembic upgrade head`, then listens on `$PORT`. `railway.json` tells Railway to use the Dockerfile, with `/api/health` as the health check.
+The root `Dockerfile` builds the React app and serves it from the FastAPI backend, so one service hosts both the website (`/`) and the API (`/api`). It listens on `$PORT`. `railway.json` tells Railway to use the Dockerfile, with `/api/health` as the health check.
 
 1. In Railway, create a project from the GitHub repo. It detects `railway.json` and builds the Dockerfile.
-2. Add a **PostgreSQL** database to the project. SQLite inside a container is wiped on every redeploy.
+2. Create a MongoDB database: a MongoDB Atlas cluster, or Railway's MongoDB template.
 3. Set these variables on the app service:
 
 | Variable | Value |
 |---|---|
-| `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` (Railway reference; `postgres://` URLs are converted automatically) |
+| `MONGODB_URI` | the MongoDB connection string |
 | `JWT_SECRET` | a long random string |
 | `GROQ_API_KEY` / `MODEL` | your Groq key and model |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` / `ADMIN_NAME` | the first admin login, created only while the database has no users |
@@ -142,20 +146,27 @@ Reaching `{"detail":"Not Found"}` at `/` means the website build isn't being ser
 
 ## Deploying on Vercel (two projects from the same repo)
 
-Vercel runs the backend as a serverless function. It can't store files (so no SQLite) and can't run a background timer (so reminders use a Cron Job).
+Vercel runs the backend as a serverless function. It can't run a background timer, so reminders use a Cron Job.
 
-**1. Backend project.** Import the repo, set **Root Directory = `backend`**. Vercel detects FastAPI in `app/main.py`. Each build runs `alembic upgrade head` (`[tool.vercel.scripts]` in `pyproject.toml`), and `backend/vercel.json` adds a daily cron at 14:00 UTC (19:30 IST). Add a Postgres database (Storage → Neon, or Supabase) and set:
+**1. Backend project.** Import the repo and set **Root Directory = `backend`**. Vercel detects FastAPI in `app/main.py`. `backend/vercel.json` adds a daily cron at 14:00 UTC (19:30 IST).
+
+Create a MongoDB Atlas cluster (free M0 is enough), either directly or with Vercel's **MongoDB Atlas** integration (Storage / Marketplace), which sets `MONGODB_URI` for you. Then:
+
+- In Atlas, go to **Network Access** and allow `0.0.0.0/0`. Vercel functions don't have fixed IP addresses.
+- Pick the Atlas region closest to your Vercel function region.
+
+Set these variables:
 
 | Variable | Value |
 |---|---|
-| `DATABASE_URL` | the Postgres connection string (`postgres://` is converted automatically) |
+| `MONGODB_URI` | the Atlas connection string (`mongodb+srv://...`) |
 | `JWT_SECRET` | long random string |
 | `GROQ_API_KEY`, `MODEL` | Groq key and model |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `ADMIN_NAME` | first admin login, created only while the database is empty |
 | `CRON_SECRET` | random string; Vercel sends it to `/api/cron/automation` |
 | `CORS_ORIGINS` | the frontend URL, e.g. `https://teamtrack.vercel.app` |
 
-Visiting the backend URL itself shows `{"detail":"Not Found"}`; that's expected. Check `/api/health` instead.
+Visiting the backend URL itself shows `{"detail":"Not Found"}`; that's expected. Check `/api/health` instead: it returns `{"status":"ok","database":"ok"}` when MongoDB is reachable. A 503 there means `MONGODB_URI` is wrong or Atlas network access is blocking Vercel.
 
 **2. Frontend project.** Import the same repo again, set **Root Directory = `frontend`** (Vite is detected). Set `VITE_API_URL` to the backend URL, e.g. `https://teamtrack-api.vercel.app`, then deploy. `frontend/vercel.json` makes page refreshes on routes like `/goals` load the app. Open this project's URL to use the app.
 
@@ -163,10 +174,10 @@ Set environment variables before deploying, or redeploy after changing them. `VI
 
 ## Production notes
 
-- Set a strong `JWT_SECRET` and a PostgreSQL `DATABASE_URL`, run `alembic upgrade head`, and serve `frontend/dist` behind the same origin, or set `CORS_ORIGINS`.
+- Set a strong `JWT_SECRET` and `MONGODB_URI`. Serve `frontend/dist` behind the same origin, or set `CORS_ORIGINS`.
 - The rate limiter and scheduler run in-process. Run a single API instance, or move them to Redis and a separate worker before scaling out.
 - Notifications are in-app only. Email and Zoho Cliq delivery aren't built yet; `app/services/notifications.py:notify` is the place to add them.
-- Use your database's backups (for example `pg_dump`). Retention and deletion policies aren't automated yet.
+- Use your database's backups (Atlas backups, or `mongodump`). Retention and deletion policies aren't automated yet.
 
 ## Not built yet (next phases)
 

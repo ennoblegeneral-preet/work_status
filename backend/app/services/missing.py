@@ -7,9 +7,7 @@ A missing update is reported as a data gap only - never as a performance signal.
 
 from datetime import date
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
+from app.db import Session
 from app.models import DailyWorkLog, LogStatus, Role, TimeOff, User
 from app.utils import daterange, get_org_settings, org_today
 
@@ -21,26 +19,17 @@ def expected_days(db: Session, user: User, start: date, end: date) -> list[date]
     joined = user.created_at.date() if user.created_at else start
     off = {
         r.day
-        for r in db.scalars(
-            select(TimeOff).where(
-                TimeOff.day >= start, TimeOff.day <= end, (TimeOff.user_id == user.id) | (TimeOff.user_id.is_(None))
-            )
-        )
+        for r in db.find(TimeOff, {"day": {"$gte": start, "$lte": end}, "user_id": {"$in": [user.id, None]}})
     }
     return [d for d in daterange(max(start, joined), end) if d.weekday() in s.working_days and d not in off]
 
 
 def reported_days(db: Session, user_id: int, start: date, end: date) -> set[date]:
-    return set(
-        db.scalars(
-            select(DailyWorkLog.report_date).where(
-                DailyWorkLog.employee_id == user_id,
-                DailyWorkLog.report_date >= start,
-                DailyWorkLog.report_date <= end,
-                DailyWorkLog.status == LogStatus.confirmed,
-            )
-        )
+    logs = db.find(
+        DailyWorkLog,
+        {"employee_id": user_id, "report_date": {"$gte": start, "$lte": end}, "status": LogStatus.confirmed},
     )
+    return {log.report_date for log in logs}
 
 
 def missing_for_user(db: Session, user: User, start: date, end: date, include_today: bool = False) -> dict:

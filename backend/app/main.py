@@ -2,12 +2,12 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from sqlalchemy import select
 
 from app.config import get_settings
+from app.db import get_database
 from app.routers import auth_users, daily_updates, dashboard, goals, misc, reports, teams
 from app.services.automation import start_scheduler, stop_scheduler
 
@@ -27,7 +27,7 @@ def bootstrap_admin() -> None:
 
     db = SessionLocal()
     try:
-        if db.scalar(select(User.id).limit(1)) is not None:
+        if db.count(User) > 0:
             return
         get_org_settings(db)
         db.add(
@@ -46,7 +46,11 @@ def bootstrap_admin() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    bootstrap_admin()
+    try:
+        bootstrap_admin()
+    except Exception:
+        # Keep serving so /api/health can report the database problem.
+        log.exception("Could not reach MongoDB at startup - check MONGODB_URI and Atlas network access")
     start_scheduler()
     yield
     stop_scheduler()
@@ -90,8 +94,14 @@ def create_app() -> FastAPI:
         app.include_router(r.router, prefix="/api")
 
     @app.get("/api/health", tags=["meta"])
-    def health():
-        return {"status": "ok"}
+    def health(response: Response):
+        try:
+            get_database().command("ping")
+        except Exception as exc:
+            log.exception("Health check: database unreachable")
+            response.status_code = 503
+            return {"status": "error", "database": f"unreachable ({type(exc).__name__}) - see the server logs"}
+        return {"status": "ok", "database": "ok"}
 
     mount_frontend(app, Path(s.frontend_dist))  # registered last so API routes win
     return app

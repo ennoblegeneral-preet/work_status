@@ -2,10 +2,7 @@ from collections import defaultdict
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
-
-from app.db import get_db
+from app.db import Session, get_db
 from app.deps import can_view_team, get_current_user, require_manager_or_admin, visible_employee_ids
 from app.models import (
     DailyWorkLog,
@@ -20,11 +17,9 @@ from app.models import (
     Team,
     TeamMember,
     User,
-    WeeklyGoal,
     WeeklyReport,
-    WorkLogItem,
 )
-from app.services.goals import goal_out, goals_query
+from app.services.goals import find_goals, goal_out
 from app.services.matching import similarity
 from app.services.missing import missing_for_user
 from app.services.progress import CLOSED_GOAL
@@ -37,13 +32,14 @@ def _scope_users(db: Session, user: User, team_id: int | None) -> list[User]:
     if team_id:
         if not can_view_team(db, user, team_id):
             raise HTTPException(404, "Not found")
-        q = select(User).join(TeamMember, TeamMember.user_id == User.id).where(TeamMember.team_id == team_id)
+        f: dict = {"id": {"$in": [m.user_id for m in db.find(TeamMember, {"team_id": team_id})]}}
     else:
+        f = {}
         ids = visible_employee_ids(db, user)
-        q = select(User)
         if ids is not None:
-            q = q.where(User.id.in_(ids - {user.id}) if user.role == Role.manager else User.id.in_(ids))
-    return list(db.scalars(q.where(User.is_active.is_(True), User.role != Role.admin).order_by(User.full_name)))
+            f["id"] = {"$in": sorted(ids - {user.id} if user.role == Role.manager else ids)}
+    f |= {"is_active": True, "role": {"$ne": Role.admin}}
+    return db.find(User, f, sort=[("full_name", 1), ("id", 1)])
 
 
 @router.get("/me")
@@ -51,23 +47,17 @@ def my_dashboard(user: User = Depends(get_current_user), db: Session = Depends(g
     today = org_today(db)
     ws, we = week_bounds(today)
     wd = get_org_settings(db).working_days
-    goals = [goal_out(db, g, today, wd) for g in db.scalars(
-        goals_query().where(WeeklyGoal.owner_id == user.id, WeeklyGoal.week_start == ws).order_by(WeeklyGoal.id))]
+    goals = [goal_out(db, g, today, wd) for g in find_goals(db, {"owner_id": user.id, "week_start": ws})]
     active = [g for g in goals if g.status not in CLOSED_GOAL or g.status == GoalStatus.completed]
-    recent = db.scalars(
-        select(DailyWorkLog)
-        .where(DailyWorkLog.employee_id == user.id, DailyWorkLog.status == LogStatus.confirmed)
-        .order_by(DailyWorkLog.report_date.desc(), DailyWorkLog.id.desc())
-        .limit(5)
+    recent = db.find(
+        DailyWorkLog,
+        {"employee_id": user.id, "status": LogStatus.confirmed},
+        sort=[("report_date", -1), ("id", -1)],
+        limit=5,
     )
-    report = db.scalar(
-        select(WeeklyReport).where(
-            WeeklyReport.report_type == ReportType.employee, WeeklyReport.employee_id == user.id, WeeklyReport.week_start == ws
-        )
-    )
-    drafts = db.scalar(
-        select(func.count(DailyWorkLog.id)).where(DailyWorkLog.employee_id == user.id, DailyWorkLog.status == LogStatus.draft)
-    )
+    db.preload(recent, "items")
+    report = db.first(WeeklyReport, {"report_type": ReportType.employee, "employee_id": user.id, "week_start": ws})
+    drafts = db.count(DailyWorkLog, {"employee_id": user.id, "status": LogStatus.draft})
     cov = missing_for_user(db, user, ws, we)
     return {
         "today": today,
@@ -89,9 +79,7 @@ def my_dashboard(user: User = Depends(get_current_user), db: Session = Depends(g
             for log in recent
         ],
         "report": {"id": report.id, "status": report.status} if report else None,
-        "unread_notifications": db.scalar(
-            select(func.count(Notification.id)).where(Notification.user_id == user.id, Notification.read_at.is_(None))
-        ),
+        "unread_notifications": db.count(Notification, {"user_id": user.id, "read_at": None}),
     }
 
 
@@ -106,24 +94,25 @@ def overview(
     ws, we = week_bounds(week_start or today)
     wd = get_org_settings(db).working_days
     users = _scope_users(db, user, team_id)
-    uids = [u.id for u in users] or [-1]
+    uids = [u.id for u in users]
 
-    goals = list(db.scalars(goals_query().where(WeeklyGoal.owner_id.in_(uids), WeeklyGoal.week_start == ws).order_by(WeeklyGoal.owner_id, WeeklyGoal.id)))
+    goals = find_goals(db, {"owner_id": {"$in": uids}, "week_start": ws}, sort=[("owner_id", 1), ("id", 1)])
     goal_rows = [goal_out(db, g, today, wd) for g in goals]
     by_owner: dict[int, list] = defaultdict(list)
     for g in goal_rows:
         by_owner[g.owner_id].append(g)
 
     team_names: dict[int, list[str]] = defaultdict(list)
-    for uid, name in db.execute(select(TeamMember.user_id, Team.name).join(Team).where(TeamMember.user_id.in_(uids))):
-        team_names[uid].append(name)
-    latest = dict(
-        db.execute(
-            select(DailyWorkLog.employee_id, func.max(DailyWorkLog.report_date))
-            .where(DailyWorkLog.employee_id.in_(uids), DailyWorkLog.status == LogStatus.confirmed)
-            .group_by(DailyWorkLog.employee_id)
-        ).all()
-    )
+    memberships = db.find(TeamMember, {"user_id": {"$in": uids}})
+    teams = db.get_many(Team, {m.team_id for m in memberships})
+    for m in memberships:
+        if m.team_id in teams:
+            team_names[m.user_id].append(teams[m.team_id].name)
+    latest = {}
+    for uid in uids:
+        last = db.first(DailyWorkLog, {"employee_id": uid, "status": LogStatus.confirmed}, sort=[("report_date", -1)])
+        if last:
+            latest[uid] = last.report_date
 
     rows, missing, expected_total, reported_total = [], [], 0, 0
     for u in users:
@@ -153,18 +142,19 @@ def overview(
                             "expected_days": cov["expected_days"], "reported_days": cov["reported_days"]})
 
     blockers = []
-    for log in db.scalars(
-        select(DailyWorkLog).where(
-            DailyWorkLog.employee_id.in_(uids), DailyWorkLog.status == LogStatus.confirmed,
-            DailyWorkLog.report_date >= ws, DailyWorkLog.report_date <= we,
-        ).order_by(DailyWorkLog.report_date.desc())
-    ):
+    week_logs = db.find(
+        DailyWorkLog,
+        {"employee_id": {"$in": uids}, "status": LogStatus.confirmed, "report_date": {"$gte": ws, "$lte": we}},
+        sort=[("report_date", -1), ("id", 1)],
+    )
+    db.preload(week_logs, "employee")
+    for log in week_logs:
         for b in log.blockers or []:
             blockers.append({"employee_id": log.employee_id, "name": log.employee.full_name, "date": log.report_date, "text": b, "log_id": log.id})
 
     active = [g for g in goal_rows if g.status not in (GoalStatus.cancelled, GoalStatus.deferred)]
     overdue = [g for g in active if g.status != GoalStatus.completed and (g.deadline or g.week_end) < today]
-    pending_q = select(func.count(WeeklyReport.id)).where(WeeklyReport.status == ReportStatus.submitted, WeeklyReport.employee_id.in_(uids))
+    pending = db.count(WeeklyReport, {"status": ReportStatus.submitted, "employee_id": {"$in": uids}})
     return {
         "week_start": ws,
         "week_end": we,
@@ -175,7 +165,7 @@ def overview(
             "in_progress_goals": sum(1 for g in active if g.status == GoalStatus.in_progress),
             "blocked_or_overdue": len({g.id for g in active if g.status == GoalStatus.blocked} | {g.id for g in overdue}),
             "submission_rate": round(reported_total / expected_total * 100) if expected_total else None,
-            "reports_pending_review": db.scalar(pending_q),
+            "reports_pending_review": pending,
         },
         "team_overview": rows,
         "goals": goal_rows,
@@ -195,7 +185,7 @@ def analytics(
     today = org_today(db)
     wd = get_org_settings(db).working_days
     users = _scope_users(db, user, team_id)
-    uids = [u.id for u in users] or [-1]
+    uids = [u.id for u in users]
     cur_ws = week_bounds(today)[0]
     first_ws = cur_ws - timedelta(days=7 * (weeks - 1))
 
@@ -203,7 +193,7 @@ def analytics(
     for i in range(weeks):
         ws = first_ws + timedelta(days=7 * i)
         we = ws + timedelta(days=6)
-        gs = [goal_out(db, g, today, wd) for g in db.scalars(goals_query().where(WeeklyGoal.owner_id.in_(uids), WeeklyGoal.week_start == ws))]
+        gs = [goal_out(db, g, today, wd) for g in find_goals(db, {"owner_id": {"$in": uids}, "week_start": ws})]
         gs = [g for g in gs if g.status != GoalStatus.cancelled]
         exp = rep = 0
         for u in users:
@@ -223,11 +213,11 @@ def analytics(
 
     # recurring blockers: greedy grouping of similar blocker texts
     groups: list[dict] = []
-    for log in db.scalars(
-        select(DailyWorkLog).where(
-            DailyWorkLog.employee_id.in_(uids), DailyWorkLog.status == LogStatus.confirmed, DailyWorkLog.report_date >= first_ws
-        )
-    ):
+    period_logs = db.find(
+        DailyWorkLog, {"employee_id": {"$in": uids}, "status": LogStatus.confirmed, "report_date": {"$gte": first_ws}}
+    )
+    db.preload(period_logs, "employee")
+    for log in period_logs:
         for b in log.blockers or []:
             g = next((g for g in groups if similarity(g["text"], b) >= 0.6), None)
             if g is None:
@@ -242,30 +232,25 @@ def analytics(
 
     overdue = [
         goal_out(db, g, today, wd)
-        for g in db.scalars(
-            goals_query().where(
-                WeeklyGoal.owner_id.in_(uids),
-                WeeklyGoal.status.in_([GoalStatus.not_started, GoalStatus.in_progress, GoalStatus.blocked]),
-                func.coalesce(WeeklyGoal.deadline, WeeklyGoal.week_end) < today,
-            )
+        for g in find_goals(
+            db,
+            {
+                "owner_id": {"$in": uids},
+                "status": {"$in": [GoalStatus.not_started, GoalStatus.in_progress, GoalStatus.blocked]},
+                "$or": [{"deadline": {"$lt": today}}, {"deadline": None, "week_end": {"$lt": today}}],
+            },
         )
     ]
 
     workload = []
+    db.preload(period_logs, "items")
     for u in users:
-        items = db.scalar(
-            select(func.count(WorkLogItem.id)).join(DailyWorkLog).where(
-                WorkLogItem.employee_id == u.id, WorkLogItem.report_date >= first_ws, DailyWorkLog.status == LogStatus.confirmed
-            )
+        mine = [log for log in period_logs if log.employee_id == u.id]
+        items = sum(len(log.items) for log in mine)
+        hours = sum(log.total_hours or 0 for log in mine)
+        open_tasks = db.count(
+            Task, {"owner_id": u.id, "status": {"$in": [TaskStatus.not_started, TaskStatus.in_progress, TaskStatus.blocked]}}
         )
-        hours = db.scalar(
-            select(func.sum(DailyWorkLog.total_hours)).where(
-                DailyWorkLog.employee_id == u.id, DailyWorkLog.report_date >= first_ws, DailyWorkLog.status == LogStatus.confirmed
-            )
-        )
-        open_tasks = db.scalar(
-            select(func.count(Task.id)).where(Task.owner_id == u.id, Task.status.in_([TaskStatus.not_started, TaskStatus.in_progress, TaskStatus.blocked]))
-        )
-        workload.append({"employee_id": u.id, "name": u.full_name, "work_items": items, "reported_hours": round(hours or 0, 1), "open_tasks": open_tasks})
+        workload.append({"employee_id": u.id, "name": u.full_name, "work_items": items, "reported_hours": round(hours, 1), "open_tasks": open_tasks})
 
     return {"weeks": trend, "recurring_blockers": recurring, "overdue_goals": overdue, "workload": workload}

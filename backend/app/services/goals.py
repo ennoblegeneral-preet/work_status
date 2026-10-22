@@ -1,9 +1,7 @@
 from datetime import date, timedelta
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
-
+from app.db import Session
 from app.models import GoalStatus, Task, TaskStatus, WeeklyGoal
 from app.schemas import GoalOut, GoalReviewDecision
 from app.services.progress import (
@@ -30,27 +28,26 @@ def goal_out(db: Session, goal: WeeklyGoal, today: date | None = None, working_d
     return out
 
 
-def goals_query():
-    return select(WeeklyGoal).options(selectinload(WeeklyGoal.tasks), selectinload(WeeklyGoal.owner))
+def find_goals(db: Session, filter: dict, sort: list | None = None, skip: int = 0, limit: int | None = None) -> list[WeeklyGoal]:
+    """Goals with their tasks and owners loaded in two extra queries (instead of per goal)."""
+    goals = db.find(WeeklyGoal, filter, sort=sort, skip=skip, limit=limit)
+    db.preload(goals, "tasks", "owner")
+    return goals
 
 
 def employee_week_goals(db: Session, employee_id: int, any_day: date, include_closed: bool = True) -> list[WeeklyGoal]:
     ws, _ = week_bounds(any_day)
-    q = goals_query().where(WeeklyGoal.owner_id == employee_id, WeeklyGoal.week_start == ws)
+    f: dict = {"owner_id": employee_id, "week_start": ws}
     if not include_closed:
-        q = q.where(WeeklyGoal.status.not_in([GoalStatus.cancelled, GoalStatus.deferred]))
-    return list(db.scalars(q.order_by(WeeklyGoal.id)))
+        f["status"] = {"$nin": [GoalStatus.cancelled, GoalStatus.deferred]}
+    return find_goals(db, f)
 
 
 def unfinished_goals(db: Session, week_start: date, employee_ids: set[int] | None) -> list[WeeklyGoal]:
-    q = goals_query().where(
-        WeeklyGoal.week_start == week_start,
-        WeeklyGoal.status.not_in(list(CLOSED_GOAL)),
-        WeeklyGoal.reviewed_at.is_(None),
-    )
+    f: dict = {"week_start": week_start, "status": {"$nin": list(CLOSED_GOAL)}, "reviewed_at": None}
     if employee_ids is not None:
-        q = q.where(WeeklyGoal.owner_id.in_(employee_ids))
-    return list(db.scalars(q.order_by(WeeklyGoal.owner_id, WeeklyGoal.id)))
+        f["owner_id"] = {"$in": sorted(employee_ids)}
+    return find_goals(db, f, sort=[("owner_id", 1), ("id", 1)])
 
 
 def review_goal(db: Session, goal: WeeklyGoal, decision: GoalReviewDecision, actor_id: int) -> WeeklyGoal | None:
@@ -102,7 +99,6 @@ def review_goal(db: Session, goal: WeeklyGoal, decision: GoalReviewDecision, act
             created_by_id=actor_id,
         )
         db.add(new_goal)
-        db.flush()
         for t in goal.tasks:
             if t.status in (TaskStatus.completed, TaskStatus.cancelled):
                 continue

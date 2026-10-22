@@ -3,12 +3,9 @@ from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
 from app.ai.provider import get_provider
 from app.config import get_settings
-from app.db import get_db
+from app.db import Session, get_db
 from app.deps import can_manage_employee, ensure_can_view_employee, get_current_user, require_admin, visible_employee_ids
 from app.models import AuditLog, Notification, Role, TimeOff, User
 from app.schemas import AuditLogOut, NotificationOut, OrgSettingsOut, OrgSettingsUpdate, TimeOffIn, TimeOffOut
@@ -54,18 +51,21 @@ def list_time_off(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    q = select(TimeOff)
+    f: dict = {}
     ids = visible_employee_ids(db, user)
     if user_id:
         ensure_can_view_employee(db, user, user_id)
-        q = q.where((TimeOff.user_id == user_id) | TimeOff.user_id.is_(None))
+        f["user_id"] = {"$in": [user_id, None]}
     elif ids is not None:
-        q = q.where(TimeOff.user_id.in_(ids) | TimeOff.user_id.is_(None))
+        f["user_id"] = {"$in": [*sorted(ids), None]}
+    day: dict = {}
     if start:
-        q = q.where(TimeOff.day >= start)
+        day["$gte"] = start
     if end:
-        q = q.where(TimeOff.day <= end)
-    return list(db.scalars(q.order_by(TimeOff.day)))
+        day["$lte"] = end
+    if day:
+        f["day"] = day
+    return db.find(TimeOff, f, sort=[("day", 1), ("id", 1)])
 
 
 @router.post("/time-off", response_model=list[TimeOffOut], status_code=201)
@@ -80,14 +80,10 @@ def add_time_off(data: TimeOffIn, user: User = Depends(get_current_user), db: Se
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You cannot add leave for this employee")
     rows = []
     for d in daterange(data.start, end):
-        exists = db.scalar(
-            select(TimeOff).where(TimeOff.day == d, TimeOff.user_id.is_(None) if data.user_id is None else TimeOff.user_id == data.user_id)
-        )
-        if not exists:
+        if not db.exists(TimeOff, {"day": d, "user_id": data.user_id}):
             row = TimeOff(user_id=data.user_id, day=d, reason=data.reason)
             db.add(row)
             rows.append(row)
-    db.flush()
     audit(db, user.id, "add_time_off", "time_off", None, after=data.model_dump(mode="json"))
     db.commit()
     return rows
@@ -110,10 +106,10 @@ def delete_time_off(row_id: int, user: User = Depends(get_current_user), db: Ses
 
 @router.get("/notifications", response_model=list[NotificationOut])
 def my_notifications(unread_only: bool = False, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    q = select(Notification).where(Notification.user_id == user.id)
+    f: dict = {"user_id": user.id}
     if unread_only:
-        q = q.where(Notification.read_at.is_(None))
-    return list(db.scalars(q.order_by(Notification.id.desc()).limit(100)))
+        f["read_at"] = None
+    return db.find(Notification, f, sort=[("id", -1)], limit=100)
 
 
 @router.post("/notifications/{nid}/read", status_code=204)
@@ -128,7 +124,7 @@ def mark_read(nid: int, user: User = Depends(get_current_user), db: Session = De
 @router.post("/notifications/read-all", status_code=204)
 def mark_all_read(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     now = datetime.now(timezone.utc)
-    for n in db.scalars(select(Notification).where(Notification.user_id == user.id, Notification.read_at.is_(None))):
+    for n in db.find(Notification, {"user_id": user.id, "read_at": None}):
         n.read_at = now
     db.commit()
 
@@ -157,11 +153,11 @@ def audit_logs(
     _: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    q = select(AuditLog)
+    f: dict = {}
     if entity_type:
-        q = q.where(AuditLog.entity_type == entity_type)
+        f["entity_type"] = entity_type
     if entity_id:
-        q = q.where(AuditLog.entity_id == entity_id)
+        f["entity_id"] = entity_id
     if actor_id:
-        q = q.where(AuditLog.actor_id == actor_id)
-    return list(db.scalars(q.order_by(AuditLog.id.desc()).limit(min(limit, 1000))))
+        f["actor_id"] = actor_id
+    return db.find(AuditLog, f, sort=[("id", -1)], limit=min(limit, 1000))

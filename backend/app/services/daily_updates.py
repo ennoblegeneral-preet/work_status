@@ -8,11 +8,9 @@ version are both kept for traceability.
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
 from app.ai.fallback import parse_text
 from app.ai.provider import LLMError, ParseContext, get_provider
+from app.db import Session
 from app.models import (
     DailyWorkLog,
     ItemStatus,
@@ -38,14 +36,9 @@ FALLBACK_NOTE = "AI is not configured, so a basic rule-based parser was used. Pl
 
 def _open_extra_tasks(db: Session, employee_id: int) -> list[Task]:
     """Open tasks not attached to a goal (previously recorded additional work)."""
-    return list(
-        db.scalars(
-            select(Task).where(
-                Task.owner_id == employee_id,
-                Task.goal_id.is_(None),
-                Task.status.not_in([TaskStatus.completed, TaskStatus.cancelled]),
-            )
-        )
+    return db.find(
+        Task,
+        {"owner_id": employee_id, "goal_id": None, "status": {"$nin": [TaskStatus.completed, TaskStatus.cancelled]}},
     )
 
 
@@ -149,17 +142,10 @@ def run_parse(
         ctx, goals, extra = _context(db, employee, report_date, text, chat or [], current_items or [])
 
     matcher = Matcher(goals, extra)
-    existing = list(
-        db.scalars(
-            select(WorkLogItem)
-            .join(DailyWorkLog)
-            .where(
-                WorkLogItem.employee_id == employee.id,
-                WorkLogItem.report_date == report_date,
-                DailyWorkLog.status == LogStatus.confirmed,
-            )
-        )
+    confirmed_logs = db.find(
+        DailyWorkLog, {"employee_id": employee.id, "report_date": report_date, "status": LogStatus.confirmed}
     )
+    existing = db.find(WorkLogItem, {"work_log_id": {"$in": [log.id for log in confirmed_logs]}})
     goal_by_id = {g.id: g for g in goals}
     items: list[DraftItem] = []
     for it in parsed.work_items:
@@ -232,14 +218,10 @@ def _assistant_reply(draft: Draft) -> str:
 
 
 def _confirmed_today(db: Session, employee_id: int, report_date: date, exclude_id: int | None = None) -> int:
-    q = select(DailyWorkLog.id).where(
-        DailyWorkLog.employee_id == employee_id,
-        DailyWorkLog.report_date == report_date,
-        DailyWorkLog.status == LogStatus.confirmed,
-    )
+    f: dict = {"employee_id": employee_id, "report_date": report_date, "status": LogStatus.confirmed}
     if exclude_id:
-        q = q.where(DailyWorkLog.id != exclude_id)
-    return len(list(db.scalars(q)))
+        f["id"] = {"$ne": exclude_id}
+    return db.count(DailyWorkLog, f)
 
 
 def draft_out(db: Session, log: DailyWorkLog) -> DraftOut:
@@ -263,13 +245,7 @@ def create_draft(db: Session, employee: User, req: ParseRequest) -> DailyWorkLog
     if req.report_date and req.report_date > today:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "The report date cannot be in the future")
     h = text_hash(req.text)
-    dup = db.scalar(
-        select(DailyWorkLog).where(
-            DailyWorkLog.employee_id == employee.id,
-            DailyWorkLog.raw_text_hash == h,
-            DailyWorkLog.status == LogStatus.confirmed,
-        )
-    )
+    dup = db.first(DailyWorkLog, {"employee_id": employee.id, "raw_text_hash": h, "status": LogStatus.confirmed})
     if dup:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -289,7 +265,6 @@ def create_draft(db: Session, employee: User, req: ParseRequest) -> DailyWorkLog
         status=LogStatus.draft,
     )
     db.add(log)
-    db.flush()
     audit(db, employee.id, "create_draft", "daily_work_log", log.id)
     return log
 
@@ -360,7 +335,6 @@ def _find_or_create_task(db: Session, employee: User, item: DraftItem, goal: Wee
         created_by_id=employee.id,
     )
     db.add(task)
-    db.flush()
     return task
 
 
@@ -382,14 +356,9 @@ def confirm(db: Session, log: DailyWorkLog, employee: User, draft: Draft) -> Dai
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "The report date cannot be in the future")
     if not draft.items:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Add at least one work item before saving")
-    same = db.scalar(
-        select(DailyWorkLog.id).where(
-            DailyWorkLog.employee_id == employee.id,
-            DailyWorkLog.raw_text_hash == log.raw_text_hash,
-            DailyWorkLog.status == LogStatus.confirmed,
-        )
-    )
-    if same:
+    if db.exists(
+        DailyWorkLog, {"employee_id": employee.id, "raw_text_hash": log.raw_text_hash, "status": LogStatus.confirmed}
+    ):
         raise HTTPException(status.HTTP_409_CONFLICT, "This exact update was already saved")
 
     touched_goals: dict[int, WeeklyGoal] = {}
@@ -415,7 +384,6 @@ def confirm(db: Session, log: DailyWorkLog, employee: User, draft: Draft) -> Dai
             match_method=item.match_method if (item.goal_id or item.task_id) else "none",
         )
         db.add(wli)
-        db.flush()
         if task is not None:
             apply_item_to_task(db, task, item.status, employee.id, wli.id)
         if goal is not None:
@@ -469,7 +437,6 @@ def update_item(db: Session, item: WorkLogItem, data: WorkLogItemUpdate, actor: 
     for f in ("task_title", "description", "project", "status", "kind", "hours"):
         if f in changes:
             setattr(item, f, changes[f])
-    db.flush()
     if item.task is not None and ("status" in changes or "task_id" in changes):
         apply_item_to_task(db, item.task, item.status, actor.id, item.id)
     goal_ids = {before["goal_id"], item.goal_id} - {None}

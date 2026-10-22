@@ -1,7 +1,5 @@
 from datetime import timedelta
 
-from sqlalchemy import func, select
-
 from app.models import Task, WorkLogItem
 from tests.conftest import auth, create_goal
 
@@ -34,7 +32,7 @@ def test_paste_parse_preview_does_not_save_work(client, org, db):
     assert d["parse_mode"] == "fallback"
     assert all(i["requires_confirmation"] for i in d["draft"]["items"])  # fallback: always confirm
     assert any("rule-based" in w for w in d["draft"]["warnings"])
-    assert db.scalar(select(func.count(WorkLogItem.id))) == 0  # nothing saved before confirmation
+    assert db.count(WorkLogItem) == 0  # nothing saved before confirmation
     assert d["raw_text"] == PASTE
 
 
@@ -93,9 +91,9 @@ def test_multi_day_work_stays_on_one_task(client, org, db):
         assert d["draft"]["items"][0]["task_id"] == goal["tasks"][0]["id"], text
         assert confirm(client, org.e1, d).status_code == 200
 
-    tasks = db.scalars(select(Task).where(Task.owner_id == org.e1.id)).all()
+    tasks = db.find(Task, {"owner_id": org.e1.id})
     assert len(tasks) == 1  # no duplicates created
-    items = db.scalars(select(WorkLogItem).where(WorkLogItem.task_id == tasks[0].id).order_by(WorkLogItem.report_date)).all()
+    items = db.find(WorkLogItem, {"task_id": tasks[0].id}, sort=[("report_date", 1)])
     assert [i.report_date for i in items] == days
     assert [i.status for i in items] == ["in_progress", "in_progress", "completed"]
     g = client.get(f"/api/goals/{goal['id']}", headers=auth(org.e1)).json()
@@ -108,10 +106,10 @@ def test_unplanned_work_is_reused_across_days(client, org, db):
     d1 = parse(client, org.e1, "Investigated flaky login test", report_date=(org.today - timedelta(days=1)).isoformat())
     confirm(client, org.e1, d1)
     d2 = parse(client, org.e1, "Investigated flaky login test, root cause found")
-    first_task = db.scalar(select(Task.id).where(Task.owner_id == org.e1.id))
+    first_task = db.first(Task, {"owner_id": org.e1.id}).id
     assert d2["draft"]["items"][0]["task_id"] == first_task
     confirm(client, org.e1, d2)
-    assert db.scalar(select(func.count(Task.id)).where(Task.owner_id == org.e1.id)) == 1
+    assert db.count(Task, {"owner_id": org.e1.id}) == 1
 
 
 def test_cannot_link_other_employees_goal(client, org):

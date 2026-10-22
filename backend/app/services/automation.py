@@ -10,7 +10,6 @@ from datetime import datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import HTTPException
-from sqlalchemy import select
 
 from app.config import get_settings
 from app.db import SessionLocal
@@ -29,11 +28,7 @@ def _after(now: datetime, hhmm: str) -> bool:
 
 
 def _is_off(db, user_id: int, day) -> bool:
-    return bool(
-        db.scalar(
-            select(TimeOff.id).where(TimeOff.day == day, (TimeOff.user_id == user_id) | (TimeOff.user_id.is_(None)))
-        )
-    )
+    return db.exists(TimeOff, {"day": day, "user_id": {"$in": [user_id, None]}})
 
 
 def run_automation(db, now: datetime | None = None) -> dict:
@@ -42,20 +37,14 @@ def run_automation(db, now: datetime | None = None) -> dict:
     today = now.date()
     counts = {"reminders": 0, "deadlines": 0, "overdue": 0, "reports": 0, "goal_reviews": 0}
     working_day = today.weekday() in s.working_days
-    users = list(db.scalars(select(User).where(User.is_active.is_(True), User.role != Role.admin)))
+    users = db.find(User, {"is_active": True, "role": {"$ne": Role.admin}})
 
     # 1. daily update reminders
     if s.reminders_enabled and working_day and _after(now, s.daily_reminder_time):
         for u in users:
             if _is_off(db, u.id, today):
                 continue
-            done = db.scalar(
-                select(DailyWorkLog.id).where(
-                    DailyWorkLog.employee_id == u.id,
-                    DailyWorkLog.report_date == today,
-                    DailyWorkLog.status == LogStatus.confirmed,
-                )
-            )
+            done = db.exists(DailyWorkLog, {"employee_id": u.id, "report_date": today, "status": LogStatus.confirmed})
             if not done and notify(
                 db, u, "daily_reminder", "Add today's work update",
                 f"reminder:{u.id}:{today.isoformat()}",
@@ -66,15 +55,13 @@ def run_automation(db, now: datetime | None = None) -> dict:
     # 2. upcoming deadlines (due tomorrow) and overdue items
     tomorrow = today + timedelta(days=1)
     open_goal = [GoalStatus.not_started, GoalStatus.in_progress, GoalStatus.blocked]
-    for g in db.scalars(select(WeeklyGoal).where(WeeklyGoal.deadline == tomorrow, WeeklyGoal.status.in_(open_goal))):
+    for g in db.find(WeeklyGoal, {"deadline": tomorrow, "status": {"$in": open_goal}}):
         if notify(db, g.owner, "deadline", f"Goal due tomorrow: {g.title}", f"deadline:goal:{g.id}:{g.deadline}", None, f"/goals/{g.id}"):
             counts["deadlines"] += 1
-    for t in db.scalars(
-        select(Task).where(Task.due_date == tomorrow, Task.status.not_in([TaskStatus.completed, TaskStatus.cancelled]))
-    ):
+    for t in db.find(Task, {"due_date": tomorrow, "status": {"$nin": [TaskStatus.completed, TaskStatus.cancelled]}}):
         if notify(db, t.owner, "deadline", f"Task due tomorrow: {t.title}", f"deadline:task:{t.id}:{t.due_date}", None, "/goals"):
             counts["deadlines"] += 1
-    for g in db.scalars(select(WeeklyGoal).where(WeeklyGoal.deadline < today, WeeklyGoal.status.in_(open_goal))):
+    for g in db.find(WeeklyGoal, {"deadline": {"$lt": today}, "status": {"$in": open_goal}}):
         for target in [g.owner, *managers_of(db, g.owner_id)]:
             if notify(
                 db, target, "overdue", f"Overdue goal: {g.title}",
@@ -88,8 +75,8 @@ def run_automation(db, now: datetime | None = None) -> dict:
         ws, _ = week_bounds(today)
         if s.auto_generate_reports:
             for u in users:
-                has_data = db.scalar(select(WeeklyGoal.id).where(WeeklyGoal.owner_id == u.id, WeeklyGoal.week_start == ws)) or db.scalar(
-                    select(DailyWorkLog.id).where(DailyWorkLog.employee_id == u.id, DailyWorkLog.report_date >= ws)
+                has_data = db.exists(WeeklyGoal, {"owner_id": u.id, "week_start": ws}) or db.exists(
+                    DailyWorkLog, {"employee_id": u.id, "report_date": {"$gte": ws}}
                 )
                 if not has_data or report_service._find_report(db, "employee", ws, u.id, None):
                     continue
@@ -100,7 +87,7 @@ def run_automation(db, now: datetime | None = None) -> dict:
                            "Review it and submit it to your manager.", "/reports")
                 except HTTPException:
                     pass
-            for team in db.scalars(select(Team)):
+            for team in db.find(Team):
                 if report_service._find_report(db, "team", ws, None, team.id):
                     continue
                 try:

@@ -2,19 +2,17 @@ import os
 
 os.environ["SCHEDULER_ENABLED"] = "false"
 os.environ["LLM_PROVIDER"] = "fallback"
-os.environ["DATABASE_URL"] = "sqlite://"
+os.environ["MONGODB_URI"] = "mongomock://"
 os.environ["JWT_SECRET"] = "test-secret-that-is-long-enough-for-hs256"
 
 from datetime import datetime, timedelta, timezone  # noqa: E402
 
+import mongomock  # noqa: E402
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import create_engine  # noqa: E402
-from sqlalchemy.orm import sessionmaker  # noqa: E402
-from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from app.ai.provider import set_provider  # noqa: E402
-from app.db import Base, get_db  # noqa: E402
+from app.db import Session, ensure_indexes, get_db  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import Role, Team, TeamMember, User  # noqa: E402
 from app.security import create_access_token, hash_password, rate_limiter  # noqa: E402
@@ -23,10 +21,9 @@ from app.utils import org_today, week_bounds  # noqa: E402
 
 @pytest.fixture
 def db():
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
-    session = Session()
+    database = mongomock.MongoClient()["teamtrack_test"]  # fresh in-memory MongoDB per test
+    ensure_indexes(database)
+    session = Session(database)
 
     def _get_db():
         yield session
@@ -38,7 +35,6 @@ def db():
     session.close()
     app.dependency_overrides.clear()
     set_provider(None)
-    engine.dispose()
 
 
 @pytest.fixture
@@ -54,9 +50,7 @@ def make_user(db, email, role=Role.employee, name=None, password="Password123!")
         role=role,
         created_at=datetime.now(timezone.utc) - timedelta(days=60),
     )
-    db.add(u)
-    db.flush()
-    return u
+    return db.add(u)
 
 
 def auth(user):
@@ -79,7 +73,6 @@ def org(db):
     o.t1 = Team(name="Team 1", manager_id=o.m1.id)
     o.t2 = Team(name="Team 2", manager_id=o.m2.id)
     db.add_all([o.t1, o.t2])
-    db.flush()
     db.add_all(
         [
             TeamMember(team_id=o.t1.id, user_id=o.e1.id),

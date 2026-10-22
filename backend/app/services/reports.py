@@ -12,11 +12,9 @@ import re
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
-
 from app.ai.provider import LLMError, get_provider
 from app.ai.types import Claim
+from app.db import Session
 from app.models import (
     DailyWorkLog,
     GoalStatus,
@@ -92,19 +90,13 @@ def _goal_fact(g: WeeklyGoal, today: date, working_days: list[int]) -> dict:
 
 
 def _week_logs(db: Session, employee_id: int, ws: date, we: date) -> list[DailyWorkLog]:
-    return list(
-        db.scalars(
-            select(DailyWorkLog)
-            .options(selectinload(DailyWorkLog.items))
-            .where(
-                DailyWorkLog.employee_id == employee_id,
-                DailyWorkLog.report_date >= ws,
-                DailyWorkLog.report_date <= we,
-                DailyWorkLog.status == LogStatus.confirmed,
-            )
-            .order_by(DailyWorkLog.report_date, DailyWorkLog.id)
-        )
+    logs = db.find(
+        DailyWorkLog,
+        {"employee_id": employee_id, "report_date": {"$gte": ws, "$lte": we}, "status": LogStatus.confirmed},
+        sort=[("report_date", 1), ("id", 1)],
     )
+    db.preload(logs, "items")
+    return logs
 
 
 def employee_facts(db: Session, employee: User, week_start: date) -> dict:
@@ -143,14 +135,7 @@ def employee_facts(db: Session, employee: User, week_start: date) -> dict:
             hours_by_day.setdefault(log.report_date, None)
 
     cov = missing_for_user(db, employee, ws, we, include_today=today > we)
-    carried_next = list(
-        db.scalars(
-            select(WeeklyGoal).where(
-                WeeklyGoal.carried_from_goal_id.in_([g.id for g in goals] or [-1]),
-                WeeklyGoal.owner_id == employee.id,
-            )
-        )
-    )
+    carried_next = db.find(WeeklyGoal, {"carried_from_goal_id": {"$in": [g.id for g in goals]}, "owner_id": employee.id})
     known_hours = [h for h in hours_by_day.values() if h is not None]
     return {
         "employee": {
@@ -182,14 +167,8 @@ def employee_facts(db: Session, employee: User, week_start: date) -> dict:
 
 
 def team_members(db: Session, team: Team) -> list[User]:
-    return list(
-        db.scalars(
-            select(User)
-            .join(TeamMember, TeamMember.user_id == User.id)
-            .where(TeamMember.team_id == team.id, User.is_active.is_(True))
-            .order_by(User.full_name)
-        )
-    )
+    ids = [m.user_id for m in db.find(TeamMember, {"team_id": team.id})]
+    return db.find(User, {"id": {"$in": ids}, "is_active": True}, sort=[("full_name", 1), ("id", 1)])
 
 
 def team_facts(db: Session, team: Team, week_start: date) -> dict:
@@ -217,13 +196,9 @@ def team_facts(db: Session, team: Team, week_start: date) -> dict:
                 "reporting": f["reporting"],
             }
         )
-    next_week = list(
-        db.scalars(
-            select(WeeklyGoal).where(
-                WeeklyGoal.owner_id.in_([int(m["ref"][2:]) for m in members] or [-1]),
-                WeeklyGoal.week_start == ws + timedelta(days=7),
-            )
-        )
+    next_week = db.find(
+        WeeklyGoal,
+        {"owner_id": {"$in": [int(m["ref"][2:]) for m in members]}, "week_start": ws + timedelta(days=7)},
     )
     return {
         "team": {"name": team.name, "department": team.department, "manager": team.manager.full_name if team.manager else None},
@@ -537,10 +512,10 @@ def team_markdown(facts: dict, ai: dict | None, mode: str) -> str:
 
 
 def _find_report(db: Session, rtype: str, week_start: date, employee_id: int | None, team_id: int | None) -> WeeklyReport | None:
-    q = select(WeeklyReport).where(WeeklyReport.report_type == rtype, WeeklyReport.week_start == week_start)
-    q = q.where(WeeklyReport.employee_id == employee_id) if employee_id else q.where(WeeklyReport.employee_id.is_(None))
-    q = q.where(WeeklyReport.team_id == team_id) if team_id else q.where(WeeklyReport.team_id.is_(None))
-    return db.scalar(q)
+    return db.first(
+        WeeklyReport,
+        {"report_type": rtype, "week_start": week_start, "employee_id": employee_id or None, "team_id": team_id or None},
+    )
 
 
 def generate(
@@ -600,7 +575,6 @@ def generate(
     report.generated_by_id = actor.id if actor else None
     report.approved_by_id = None
     report.approved_at = None
-    db.flush()
     if actor:
         db.add(ReportReview(report_id=report.id, reviewer_id=actor.id, action="generate", comment=f"Version {report.version}"))
     return report

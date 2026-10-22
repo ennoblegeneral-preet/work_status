@@ -84,3 +84,8 @@ def test_validation_errors(client, org):
     r = client.post("/api/goals", json={"title": "N", "owner_id": org.e1.id, "week_start": org.week_start.isoformat(),
                                        "target_type": "number"}, headers=auth(org.admin))
     assert r.status_code == 422
+
+
+def test_health_checks_the_database(client):
+    r = client.get("/api/health")
+    assert r.status_code == 200 and r.json() == {"status": "ok", "database": "ok"}

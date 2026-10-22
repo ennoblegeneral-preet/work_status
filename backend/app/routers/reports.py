@@ -1,10 +1,7 @@
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
-
-from app.db import get_db
+from app.db import Session, get_db
 from app.deps import (
     ai_rate_limit,
     can_manage_employee,
@@ -24,12 +21,10 @@ from app.utils import audit, week_bounds
 router = APIRouter(prefix="/reports", tags=["reports"])
 
 
-def _q():
-    return select(WeeklyReport).options(
-        selectinload(WeeklyReport.employee),
-        selectinload(WeeklyReport.team),
-        selectinload(WeeklyReport.reviews).selectinload(ReportReview.reviewer),
-    ).execution_options(populate_existing=True)
+def _load(db: Session, reports: list[WeeklyReport]) -> list[WeeklyReport]:
+    db.preload(reports, "employee", "team", "reviews")
+    db.preload([rv for r in reports for rv in r.reviews], "reviewer")
+    return reports
 
 
 def _out(r: WeeklyReport, cls=ReportOut):
@@ -52,10 +47,10 @@ def _can_review(db: Session, user: User, r: WeeklyReport) -> bool:
 
 
 def _get(db: Session, user: User, report_id: int) -> WeeklyReport:
-    r = db.scalar(_q().where(WeeklyReport.id == report_id))
+    r = db.get(WeeklyReport, report_id)
     if r is None or not _can_view(db, user, r):
         raise HTTPException(404, "Not found")
-    return r
+    return _load(db, [r])[0]
 
 
 def _review(db: Session, r: WeeklyReport, user: User, action: str, comment: str | None) -> None:
@@ -78,7 +73,7 @@ def generate(data: GenerateReportIn, user: User = Depends(get_current_user), db:
             raise HTTPException(404, "Not found")
         r = svc.generate(db, user, data.week_start, team=team)
     db.commit()
-    return _out(db.scalar(_q().where(WeeklyReport.id == r.id)))
+    return _out(r)
 
 
 @router.get("", response_model=list[ReportListItem])
@@ -91,22 +86,23 @@ def list_reports(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    q = _q()
+    f: dict = {}
     if week_start:
-        q = q.where(WeeklyReport.week_start == week_bounds(week_start)[0])
+        f["week_start"] = week_bounds(week_start)[0]
     if report_type:
-        q = q.where(WeeklyReport.report_type == report_type)
+        f["report_type"] = report_type
     if status_:
-        q = q.where(WeeklyReport.status == status_)
+        f["status"] = status_
     if employee_id:
-        q = q.where(WeeklyReport.employee_id == employee_id)
+        f["employee_id"] = employee_id
     if team_id:
-        q = q.where(WeeklyReport.team_id == team_id)
+        f["team_id"] = team_id
     if user.role != Role.admin:
-        ids = visible_employee_ids(db, user) or set()
+        ids = sorted(visible_employee_ids(db, user) or set())
         teams = managed_team_ids(db, user)
-        q = q.where(WeeklyReport.employee_id.in_(ids or {-1}) | WeeklyReport.team_id.in_(teams or [-1]))
-    rows = db.scalars(q.order_by(WeeklyReport.week_start.desc(), WeeklyReport.report_type, WeeklyReport.id).limit(500))
+        f["$or"] = [{"employee_id": {"$in": ids}}, {"team_id": {"$in": teams}}]
+    rows = db.find(WeeklyReport, f, sort=[("week_start", -1), ("report_type", 1), ("id", 1)], limit=500)
+    db.preload(rows, "employee", "team")
     return [_out(r, ReportListItem) for r in rows]
 
 

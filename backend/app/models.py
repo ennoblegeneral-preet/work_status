@@ -1,27 +1,13 @@
-"""SQLAlchemy models.
+"""Data models, stored in MongoDB (one collection per class; see app/db.py).
 
-Enum-like columns are stored as plain strings (validated by the StrEnums below)
-so the schema stays portable between SQLite (local dev) and PostgreSQL.
+Enum-like fields are stored as plain strings, validated by the StrEnums below.
+Every record has an integer id, so codes like G-12 / T-40 stay stable.
 """
 
 from datetime import date, datetime, timezone
 from enum import StrEnum
 
-from sqlalchemy import (
-    JSON,
-    Boolean,
-    Date,
-    DateTime,
-    Float,
-    ForeignKey,
-    Integer,
-    String,
-    Text,
-    UniqueConstraint,
-)
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-
-from app.db import Base
+from app.db import BelongsTo, Doc, HasMany, factory
 
 
 def utcnow() -> datetime:
@@ -96,281 +82,270 @@ class ReportStatus(StrEnum):
 
 
 class TimestampMixin:
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    __onupdate__ = ("updated_at",)
+
+    created_at: datetime = factory(utcnow)
+    updated_at: datetime = factory(utcnow)
 
 
-class User(TimestampMixin, Base):
-    __tablename__ = "users"
+class User(TimestampMixin, Doc):
+    __collection__ = "users"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    full_name: Mapped[str] = mapped_column(String(255))
-    password_hash: Mapped[str] = mapped_column(String(255))
-    role: Mapped[str] = mapped_column(String(20), default=Role.employee, index=True)
-    department: Mapped[str | None] = mapped_column(String(120))
-    job_title: Mapped[str | None] = mapped_column(String(120))
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    email: str = None  # stored lowercase, unique
+    full_name: str = None
+    password_hash: str = None
+    role: str = Role.employee
+    department: str | None = None
+    job_title: str | None = None
+    is_active: bool = True
     # {"daily_reminder": true, "deadlines": true, "blockers": true, "reports": true}
-    notification_prefs: Mapped[dict] = mapped_column(JSON, default=dict)
+    notification_prefs: dict = factory(dict)
 
 
-class Team(TimestampMixin, Base):
-    __tablename__ = "teams"
+class Team(TimestampMixin, Doc):
+    __collection__ = "teams"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(120), unique=True)
-    department: Mapped[str | None] = mapped_column(String(120))
-    manager_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)
+    name: str = None  # unique
+    department: str | None = None
+    manager_id: int | None = None
 
-    manager: Mapped[User | None] = relationship(foreign_keys=[manager_id])
-    members: Mapped[list["TeamMember"]] = relationship(back_populates="team", cascade="all, delete-orphan")
-
-
-class TeamMember(Base):
-    __tablename__ = "team_members"
-    __table_args__ = (UniqueConstraint("team_id", "user_id"),)
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-    team: Mapped[Team] = relationship(back_populates="members")
-    user: Mapped[User] = relationship()
+    manager = BelongsTo("User", "manager_id")
+    members = HasMany("TeamMember", "team_id", delete_orphan=True)
 
 
-class WeeklyGoal(TimestampMixin, Base):
-    __tablename__ = "weekly_goals"
+class TeamMember(Doc):
+    __collection__ = "team_members"  # unique (team_id, user_id)
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    title: Mapped[str] = mapped_column(String(255))
-    description: Mapped[str | None] = mapped_column(Text)
-    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    team_id: Mapped[int | None] = mapped_column(ForeignKey("teams.id"), index=True)
-    project: Mapped[str | None] = mapped_column(String(120), index=True)
-    week_start: Mapped[date] = mapped_column(Date, index=True)
-    week_end: Mapped[date] = mapped_column(Date)
-    expected_outcome: Mapped[str | None] = mapped_column(Text)
-    success_criteria: Mapped[str | None] = mapped_column(Text)
-    priority: Mapped[str] = mapped_column(String(20), default=Priority.medium)
-    start_date: Mapped[date | None] = mapped_column(Date)
-    deadline: Mapped[date | None] = mapped_column(Date)
-    original_deadline: Mapped[date | None] = mapped_column(Date)
-    status: Mapped[str] = mapped_column(String(20), default=GoalStatus.not_started, index=True)
-    target_type: Mapped[str] = mapped_column(String(20), default=TargetType.tasks)
-    target_value: Mapped[float | None] = mapped_column(Float)
-    current_value: Mapped[float | None] = mapped_column(Float)
-    unit: Mapped[str | None] = mapped_column(String(40))
-    dependencies: Mapped[str | None] = mapped_column(Text)
-    blockers: Mapped[str | None] = mapped_column(Text)
-    carried_from_goal_id: Mapped[int | None] = mapped_column(ForeignKey("weekly_goals.id"))
-    carry_forward_reason: Mapped[str | None] = mapped_column(Text)
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    team_id: int = None
+    user_id: int = None
+    created_at: datetime = factory(utcnow)
 
-    owner: Mapped[User] = relationship(foreign_keys=[owner_id])
-    team: Mapped[Team | None] = relationship()
-    tasks: Mapped[list["Task"]] = relationship(back_populates="goal", order_by="Task.id")
+    team = BelongsTo("Team", "team_id")
+    user = BelongsTo("User", "user_id")
+
+
+class WeeklyGoal(TimestampMixin, Doc):
+    __collection__ = "weekly_goals"
+
+    title: str = None
+    description: str | None = None
+    owner_id: int = None
+    team_id: int | None = None
+    project: str | None = None
+    week_start: date = None
+    week_end: date = None
+    expected_outcome: str | None = None
+    success_criteria: str | None = None
+    priority: str = Priority.medium
+    start_date: date | None = None
+    deadline: date | None = None
+    original_deadline: date | None = None
+    status: str = GoalStatus.not_started
+    target_type: str = TargetType.tasks
+    target_value: float | None = None
+    current_value: float | None = None
+    unit: str | None = None
+    dependencies: str | None = None
+    blockers: str | None = None
+    carried_from_goal_id: int | None = None
+    carry_forward_reason: str | None = None
+    reviewed_at: datetime | None = None
+    created_by_id: int | None = None
+
+    owner = BelongsTo("User", "owner_id")
+    team = BelongsTo("Team", "team_id")
+    tasks = HasMany("Task", "goal_id")
 
     @property
     def code(self) -> str:
         return f"G-{self.id}"
 
 
-class Task(TimestampMixin, Base):
-    __tablename__ = "tasks"
+class Task(TimestampMixin, Doc):
+    __collection__ = "tasks"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    goal_id: Mapped[int | None] = mapped_column(ForeignKey("weekly_goals.id"), index=True)
-    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    title: Mapped[str] = mapped_column(String(255))
-    description: Mapped[str | None] = mapped_column(Text)
-    project: Mapped[str | None] = mapped_column(String(120))
-    status: Mapped[str] = mapped_column(String(20), default=TaskStatus.not_started, index=True)
-    priority: Mapped[str] = mapped_column(String(20), default=Priority.medium)
-    weight: Mapped[int] = mapped_column(Integer, default=1)
-    due_date: Mapped[date | None] = mapped_column(Date)
-    is_unplanned: Mapped[bool] = mapped_column(Boolean, default=False)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    carried_from_task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"))
-    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    goal_id: int | None = None
+    owner_id: int = None
+    title: str = None
+    description: str | None = None
+    project: str | None = None
+    status: str = TaskStatus.not_started
+    priority: str = Priority.medium
+    weight: int = 1
+    due_date: date | None = None
+    is_unplanned: bool = False
+    completed_at: datetime | None = None
+    carried_from_task_id: int | None = None
+    created_by_id: int | None = None
 
-    goal: Mapped[WeeklyGoal | None] = relationship(back_populates="tasks")
-    owner: Mapped[User] = relationship(foreign_keys=[owner_id])
+    goal = BelongsTo("WeeklyGoal", "goal_id")
+    owner = BelongsTo("User", "owner_id")
 
     @property
     def code(self) -> str:
         return f"T-{self.id}"
 
 
-class TaskStatusHistory(Base):
-    __tablename__ = "task_status_history"
+class TaskStatusHistory(Doc):
+    __collection__ = "task_status_history"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
-    from_status: Mapped[str | None] = mapped_column(String(20))
-    to_status: Mapped[str] = mapped_column(String(20))
-    changed_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
-    work_log_item_id: Mapped[int | None] = mapped_column(ForeignKey("work_log_items.id"))
-    reason: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
-class GoalStatusHistory(Base):
-    __tablename__ = "goal_status_history"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    goal_id: Mapped[int] = mapped_column(ForeignKey("weekly_goals.id", ondelete="CASCADE"), index=True)
-    from_status: Mapped[str | None] = mapped_column(String(20))
-    to_status: Mapped[str] = mapped_column(String(20))
-    changed_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
-    reason: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    task_id: int = None
+    from_status: str | None = None
+    to_status: str = None
+    changed_by_id: int | None = None
+    work_log_item_id: int | None = None
+    reason: str | None = None
+    created_at: datetime = factory(utcnow)
 
 
-class DailyWorkLog(TimestampMixin, Base):
+class GoalStatusHistory(Doc):
+    __collection__ = "goal_status_history"
+
+    goal_id: int = None
+    from_status: str | None = None
+    to_status: str = None
+    changed_by_id: int | None = None
+    reason: str | None = None
+    created_at: datetime = factory(utcnow)
+
+
+class DailyWorkLog(TimestampMixin, Doc):
     """One submitted update. The original text is never modified."""
 
-    __tablename__ = "daily_work_logs"
+    __collection__ = "daily_work_logs"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    employee_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    report_date: Mapped[date] = mapped_column(Date, index=True)
-    input_method: Mapped[str] = mapped_column(String(20))  # paste | chat
-    raw_text: Mapped[str] = mapped_column(Text)
-    raw_text_hash: Mapped[str] = mapped_column(String(64), index=True)
-    chat_messages: Mapped[list] = mapped_column(JSON, default=list)
-    parse_mode: Mapped[str] = mapped_column(String(20), default="ai")  # ai | fallback
-    parsed_draft: Mapped[dict] = mapped_column(JSON, default=dict)
-    status: Mapped[str] = mapped_column(String(20), default=LogStatus.draft, index=True)
-    total_hours: Mapped[float | None] = mapped_column(Float)
-    blockers: Mapped[list] = mapped_column(JSON, default=list)
-    next_steps: Mapped[list] = mapped_column(JSON, default=list)
-    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    employee_id: int = None
+    report_date: date = None
+    input_method: str = None  # paste | chat
+    raw_text: str = None
+    raw_text_hash: str = None
+    chat_messages: list = factory(list)
+    parse_mode: str = "ai"  # ai | fallback
+    parsed_draft: dict = factory(dict)
+    status: str = LogStatus.draft
+    total_hours: float | None = None
+    blockers: list = factory(list)
+    next_steps: list = factory(list)
+    confirmed_at: datetime | None = None
 
-    employee: Mapped[User] = relationship()
-    items: Mapped[list["WorkLogItem"]] = relationship(back_populates="work_log", order_by="WorkLogItem.id")
-
-
-class WorkLogItem(TimestampMixin, Base):
-    __tablename__ = "work_log_items"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    work_log_id: Mapped[int] = mapped_column(ForeignKey("daily_work_logs.id", ondelete="CASCADE"), index=True)
-    employee_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    report_date: Mapped[date] = mapped_column(Date, index=True)
-    task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"), index=True)
-    goal_id: Mapped[int | None] = mapped_column(ForeignKey("weekly_goals.id"), index=True)
-    is_unplanned: Mapped[bool] = mapped_column(Boolean, default=False)
-    project: Mapped[str | None] = mapped_column(String(120))
-    task_title: Mapped[str] = mapped_column(String(255))
-    description: Mapped[str | None] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(String(20), default=ItemStatus.in_progress)
-    kind: Mapped[str] = mapped_column(String(20), default=ItemKind.activity)
-    evidence: Mapped[str | None] = mapped_column(Text)
-    hours: Mapped[float | None] = mapped_column(Float)
-    confidence: Mapped[float | None] = mapped_column(Float)
-    match_method: Mapped[str | None] = mapped_column(String(20))
-
-    work_log: Mapped[DailyWorkLog] = relationship(back_populates="items")
-    task: Mapped[Task | None] = relationship()
-    goal: Mapped[WeeklyGoal | None] = relationship()
+    employee = BelongsTo("User", "employee_id")
+    items = HasMany("WorkLogItem", "work_log_id")
 
 
-class WeeklyReport(TimestampMixin, Base):
-    __tablename__ = "weekly_reports"
-    __table_args__ = (UniqueConstraint("report_type", "employee_id", "team_id", "week_start"),)
+class WorkLogItem(TimestampMixin, Doc):
+    __collection__ = "work_log_items"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    report_type: Mapped[str] = mapped_column(String(20))
-    employee_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)
-    team_id: Mapped[int | None] = mapped_column(ForeignKey("teams.id"), index=True)
-    week_start: Mapped[date] = mapped_column(Date, index=True)
-    week_end: Mapped[date] = mapped_column(Date)
-    status: Mapped[str] = mapped_column(String(20), default=ReportStatus.draft, index=True)
-    generation_mode: Mapped[str] = mapped_column(String(20), default="ai")
-    facts: Mapped[dict] = mapped_column(JSON, default=dict)
-    ai_summary: Mapped[dict] = mapped_column(JSON, default=dict)
-    validation_warnings: Mapped[list] = mapped_column(JSON, default=list)
-    content_markdown: Mapped[str] = mapped_column(Text, default="")
-    edited_by_human: Mapped[bool] = mapped_column(Boolean, default=False)
-    generated_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
-    approved_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
-    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    version: Mapped[int] = mapped_column(Integer, default=1)
+    work_log_id: int = None
+    employee_id: int = None
+    report_date: date = None
+    task_id: int | None = None
+    goal_id: int | None = None
+    is_unplanned: bool = False
+    project: str | None = None
+    task_title: str = None
+    description: str | None = None
+    status: str = ItemStatus.in_progress
+    kind: str = ItemKind.activity
+    evidence: str | None = None
+    hours: float | None = None
+    confidence: float | None = None
+    match_method: str | None = None
 
-    employee: Mapped[User | None] = relationship(foreign_keys=[employee_id])
-    team: Mapped[Team | None] = relationship()
-    reviews: Mapped[list["ReportReview"]] = relationship(back_populates="report", order_by="ReportReview.id")
+    work_log = BelongsTo("DailyWorkLog", "work_log_id")
+    task = BelongsTo("Task", "task_id")
+    goal = BelongsTo("WeeklyGoal", "goal_id")
 
 
-class ReportReview(Base):
-    __tablename__ = "report_reviews"
+class WeeklyReport(TimestampMixin, Doc):
+    __collection__ = "weekly_reports"  # unique (report_type, employee_id, team_id, week_start)
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    report_id: Mapped[int] = mapped_column(ForeignKey("weekly_reports.id", ondelete="CASCADE"), index=True)
-    reviewer_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
-    action: Mapped[str] = mapped_column(String(20))  # generate | edit | submit | approve | return
-    comment: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    report_type: str = None
+    employee_id: int | None = None
+    team_id: int | None = None
+    week_start: date = None
+    week_end: date = None
+    status: str = ReportStatus.draft
+    generation_mode: str = "ai"
+    facts: dict = factory(dict)
+    ai_summary: dict = factory(dict)
+    validation_warnings: list = factory(list)
+    content_markdown: str = ""
+    edited_by_human: bool = False
+    generated_by_id: int | None = None
+    approved_by_id: int | None = None
+    approved_at: datetime | None = None
+    version: int = 1
 
-    report: Mapped[WeeklyReport] = relationship(back_populates="reviews")
-    reviewer: Mapped[User] = relationship()
-
-
-class Notification(Base):
-    __tablename__ = "notifications"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    type: Mapped[str] = mapped_column(String(40))
-    title: Mapped[str] = mapped_column(String(255))
-    body: Mapped[str | None] = mapped_column(Text)
-    link: Mapped[str | None] = mapped_column(String(255))
-    dedupe_key: Mapped[str] = mapped_column(String(200), unique=True)
-    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    employee = BelongsTo("User", "employee_id")
+    team = BelongsTo("Team", "team_id")
+    reviews = HasMany("ReportReview", "report_id")
 
 
-class AuditLog(Base):
-    __tablename__ = "audit_logs"
+class ReportReview(Doc):
+    __collection__ = "report_reviews"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    actor_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)
-    action: Mapped[str] = mapped_column(String(60))
-    entity_type: Mapped[str] = mapped_column(String(60), index=True)
-    entity_id: Mapped[int | None] = mapped_column(Integer, index=True)
-    before: Mapped[dict | None] = mapped_column(JSON)
-    after: Mapped[dict | None] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    report_id: int = None
+    reviewer_id: int = None
+    action: str = None  # generate | edit | submit | approve | return
+    comment: str | None = None
+    created_at: datetime = factory(utcnow)
+
+    report = BelongsTo("WeeklyReport", "report_id")
+    reviewer = BelongsTo("User", "reviewer_id")
 
 
-class TimeOff(Base):
+class Notification(Doc):
+    __collection__ = "notifications"
+    __ignore_duplicates__ = True  # dedupe_key is unique: a concurrent duplicate is simply not stored
+
+    user_id: int = None
+    type: str = None
+    title: str = None
+    body: str | None = None
+    link: str | None = None
+    dedupe_key: str = None
+    read_at: datetime | None = None
+    created_at: datetime = factory(utcnow)
+
+
+class AuditLog(Doc):
+    __collection__ = "audit_logs"
+
+    actor_id: int | None = None
+    action: str = None
+    entity_type: str = None
+    entity_id: int | None = None
+    before: dict | None = None
+    after: dict | None = None
+    created_at: datetime = factory(utcnow)
+
+
+class TimeOff(Doc):
     """Leave for one employee, or an organization holiday when user_id is null."""
 
-    __tablename__ = "time_off"
+    __collection__ = "time_off"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    day: Mapped[date] = mapped_column(Date, index=True)
-    reason: Mapped[str | None] = mapped_column(String(255))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    user_id: int | None = None
+    day: date = None
+    reason: str | None = None
+    created_at: datetime = factory(utcnow)
 
 
-class OrgSettings(TimestampMixin, Base):
-    __tablename__ = "org_settings"
+class OrgSettings(TimestampMixin, Doc):
+    """Single document with id 1."""
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    org_name: Mapped[str] = mapped_column(String(120), default="My Organization")
-    timezone: Mapped[str] = mapped_column(String(60), default="Asia/Kolkata")
+    __collection__ = "org_settings"
+    __ignore_duplicates__ = True  # two first requests may both create the defaults
+
+    org_name: str = "My Organization"
+    timezone: str = "Asia/Kolkata"
     # 0 = Monday ... 6 = Sunday
-    working_days: Mapped[list] = mapped_column(JSON, default=lambda: [0, 1, 2, 3, 4])
-    daily_reminder_time: Mapped[str] = mapped_column(String(5), default="18:00")
-    report_generation_day: Mapped[int] = mapped_column(Integer, default=4)  # Friday
-    report_generation_time: Mapped[str] = mapped_column(String(5), default="19:00")
-    min_daily_hours: Mapped[float | None] = mapped_column(Float, default=None)
-    max_daily_hours: Mapped[float | None] = mapped_column(Float, default=12)
-    managers_can_assign_goals: Mapped[bool] = mapped_column(Boolean, default=True)
-    reminders_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    auto_generate_reports: Mapped[bool] = mapped_column(Boolean, default=True)
+    working_days: list = factory(lambda: [0, 1, 2, 3, 4])
+    daily_reminder_time: str = "18:00"
+    report_generation_day: int = 4  # Friday
+    report_generation_time: str = "19:00"
+    min_daily_hours: float | None = None
+    max_daily_hours: float | None = 12
+    managers_can_assign_goals: bool = True
+    reminders_enabled: bool = True
+    auto_generate_reports: bool = True

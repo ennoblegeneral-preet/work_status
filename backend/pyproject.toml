@@ -6,8 +6,6 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
-    "sqlalchemy>=2.0",
-    "alembic>=1.13",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "pyjwt>=2.8",
@@ -16,17 +14,18 @@ dependencies = [
     "apscheduler>=3.10,<4",
     "openpyxl>=3.1",
     "fpdf2>=2.7",
-    "psycopg[binary]>=3.1",
     "groq>=1.7.0",
+    "pymongo>=4.8",
 ]
 
 [dependency-groups]
-dev = ["pytest>=8", "httpx>=0.27"]
+dev = [
+    "pytest>=8",
+    "httpx>=0.27",
+    "mongomock>=4.3",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
 
-# Vercel (project Root Directory = backend): apply database migrations during each build.
-[tool.vercel.scripts]
-build = "alembic upgrade head"

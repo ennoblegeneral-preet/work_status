@@ -8,11 +8,8 @@ All data-visibility rules live here so every router enforces them the same way:
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
 from app.config import get_settings
-from app.db import get_db
+from app.db import Session, get_db
 from app.models import Role, Team, TeamMember, User
 from app.security import decode_access_token, rate_limiter
 
@@ -50,7 +47,7 @@ def ai_rate_limit(request: Request, user: User = Depends(get_current_user)) -> N
 
 
 def managed_team_ids(db: Session, user: User) -> list[int]:
-    return list(db.scalars(select(Team.id).where(Team.manager_id == user.id)))
+    return [t.id for t in db.find(Team, {"manager_id": user.id})]
 
 
 def visible_employee_ids(db: Session, user: User) -> set[int] | None:
@@ -61,7 +58,7 @@ def visible_employee_ids(db: Session, user: User) -> set[int] | None:
     if user.role == Role.manager:
         team_ids = managed_team_ids(db, user)
         if team_ids:
-            ids.update(db.scalars(select(TeamMember.user_id).where(TeamMember.team_id.in_(team_ids))))
+            ids.update(m.user_id for m in db.find(TeamMember, {"team_id": {"$in": team_ids}}))
     return ids
 
 

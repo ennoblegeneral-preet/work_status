@@ -11,9 +11,7 @@ Usage:  uv run python -m app.seed            (refuses if users exist)
 import sys
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import select
-
-from app.db import Base, SessionLocal, engine
+from app.db import SessionLocal, drop_all, get_database
 from app.models import (
     DailyWorkLog,
     GoalStatus,
@@ -38,9 +36,7 @@ def _user(db, email, name, role, dept, title):
         email=email, full_name=name, password_hash=hash_password(PASSWORD), role=role, department=dept, job_title=title,
         created_at=datetime.now(timezone.utc) - timedelta(days=90),
     )
-    db.add(u)
-    db.flush()
-    return u
+    return db.add(u)
 
 
 def _goal(db, owner, team, ws, title, project, outcome, criteria, tasks, priority="medium", deadline_offset=4, creator=None, **kw):
@@ -51,11 +47,8 @@ def _goal(db, owner, team, ws, title, project, outcome, criteria, tasks, priorit
         created_by_id=creator.id if creator else None, **kw,
     )
     db.add(g)
-    db.flush()
     for t in tasks:
         db.add(Task(goal_id=g.id, owner_id=owner.id, title=t, project=project, created_by_id=g.created_by_id))
-    db.flush()
-    db.refresh(g)
     return g
 
 
@@ -70,7 +63,6 @@ def _log(db, emp, day, text, items, hours=None, blockers=(), next_steps=()):
         parse_mode="seed", parsed_draft={}, status=LogStatus.draft,
     )
     db.add(log)
-    db.flush()
     draft = Draft(
         report_date=day,
         items=[
@@ -91,11 +83,10 @@ def _log(db, emp, day, text, items, hours=None, blockers=(), next_steps=()):
 
 def seed(reset: bool = False) -> None:
     if reset:
-        Base.metadata.drop_all(engine)
-        Base.metadata.create_all(engine)
+        _wipe()
     db = SessionLocal()
     try:
-        if db.scalar(select(User.id)):
+        if db.count(User):
             print("Users already exist - run with --reset to recreate demo data.")
             return
         s = get_org_settings(db)
@@ -117,12 +108,10 @@ def seed(reset: bool = False) -> None:
         ai_team = Team(name="AI Products", department="Technology", manager_id=priya.id)
         ops_team = Team(name="Partnerships & Communications", department="Partnerships", manager_id=vikram.id)
         db.add_all([ai_team, ops_team])
-        db.flush()
         for u in (arjun, neha, rahul):
             db.add(TeamMember(team_id=ai_team.id, user_id=u.id))
         for u in (ananya, karan, sara):
             db.add(TeamMember(team_id=ops_team.id, user_id=u.id))
-        db.flush()
 
         # ---------------- last week
         lw_days = [lw + timedelta(days=i) for i in range(5)]
@@ -243,7 +232,7 @@ def seed(reset: bool = False) -> None:
                  ["Waiting on DevOps for production alert channel"])
             _log(db, karan, d, "Collected 30 photos from field teams for the annual report.",
                  [("Collect photos", "completed", "outcome", k2, _t(k2, 1), None, "Collected 30 photos")], 5)
-        for g in db.scalars(select(WeeklyGoal)):
+        for g in db.find(WeeklyGoal):
             if g.status == GoalStatus.not_started and g.week_start == lw:
                 g.status = GoalStatus.in_progress
         db.commit()
@@ -253,8 +242,7 @@ def seed(reset: bool = False) -> None:
 
 
 def _wipe() -> None:
-    Base.metadata.drop_all(engine)
-    Base.metadata.create_all(engine)
+    drop_all(get_database())
 
 
 def seed_empty() -> None:
@@ -297,10 +285,8 @@ def seed_starter() -> None:
         rahul = user("rahul@teamtrack.local", "Rahul Verma", Role.employee, "Backend Developer")
         team = Team(name="AI Products", department="Technology", manager_id=priya.id)
         db.add(team)
-        db.flush()
         for u in (arjun, neha, rahul):
             db.add(TeamMember(team_id=team.id, user_id=u.id))
-        db.flush()
 
         _goal(db, arjun, team, ws, "Phone detection for proctoring", "Interview AI", "Detect phone use during interviews",
               "90% detection on labelled clips", ["Collect labelled clips", "Train detection model", "Integrate with interview flow"],

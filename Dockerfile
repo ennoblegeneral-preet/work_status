@@ -23,5 +23,5 @@ COPY backend/ ./
 COPY --from=frontend /app/frontend/dist /app/frontend/dist
 
 EXPOSE 8000
-# Apply migrations, then start the server on the port the platform provides.
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*'"]
+# Start the server on the port the platform provides (MongoDB indexes are created on first use).
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*'"]

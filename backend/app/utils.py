@@ -2,8 +2,7 @@ import hashlib
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy.orm import Session
-
+from app.db import Session
 from app.models import AuditLog, OrgSettings
 
 
@@ -28,9 +27,7 @@ def text_hash(text: str) -> str:
 def get_org_settings(db: Session) -> OrgSettings:
     s = db.get(OrgSettings, 1)
     if s is None:
-        s = OrgSettings(id=1)
-        db.add(s)
-        db.flush()
+        s = db.add(OrgSettings(id=1))
     return s
 
 

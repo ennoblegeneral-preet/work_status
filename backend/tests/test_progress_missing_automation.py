@@ -1,7 +1,5 @@
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import select
-
 from app.models import GoalStatus, Notification, OrgSettings, TargetType, Task, TimeOff, WeeklyGoal
 from app.services.automation import run_automation
 from app.services.missing import missing_for_user
@@ -90,10 +88,7 @@ def test_missing_updates_respect_schedule_leave_and_holidays(db, org):
 
 
 def test_reminders_are_not_duplicated_and_respect_preferences(db, org, client):
-    s = db.get(OrgSettings, 1) or OrgSettings(id=1)
-    db.merge(s)
-    db.commit()
-    s = db.get(OrgSettings, 1)
+    s = db.get(OrgSettings, 1) or db.add(OrgSettings(id=1))
     s.working_days = [0, 1, 2, 3, 4, 5, 6]
     s.daily_reminder_time = "17:00"
     s.report_generation_day = 6 if datetime.now().weekday() != 6 else 5
@@ -104,7 +99,7 @@ def test_reminders_are_not_duplicated_and_respect_preferences(db, org, client):
     second = run_automation(db, now)
     assert first["reminders"] == 4  # m1, m2, e1, e3 (e2 opted out; admins excluded)
     assert second["reminders"] == 0
-    users = {n.user_id for n in db.scalars(select(Notification).where(Notification.type == "daily_reminder"))}
+    users = {n.user_id for n in db.find(Notification, {"type": "daily_reminder"})}
     assert org.e2.id not in users and org.admin.id not in users
     early = run_automation(db, now.replace(hour=9))
     assert early["reminders"] == 0

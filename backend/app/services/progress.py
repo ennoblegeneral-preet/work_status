@@ -6,9 +6,7 @@ a numeric target, or an explicit completed status.
 
 from datetime import date, datetime, timezone
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
-
+from app.db import Session
 from app.models import (
     GoalStatus,
     GoalStatusHistory,
@@ -80,7 +78,8 @@ def goal_health(goal: WeeklyGoal, today: date, working_days: list[int], progress
 
 
 def last_activity(db: Session, goal_id: int) -> date | None:
-    return db.scalar(select(func.max(WorkLogItem.report_date)).where(WorkLogItem.goal_id == goal_id))
+    latest = db.first(WorkLogItem, {"goal_id": goal_id}, sort=[("report_date", -1)])
+    return latest.report_date if latest else None
 
 
 def set_task_status(
@@ -128,12 +127,10 @@ def sync_goal_status_from_work(db: Session, goal: WeeklyGoal, actor_id: int | No
       non-cancelled tasks are completed (the defined success rule)
     - completed task-based goal -> in_progress if a task is reopened
     """
-    db.flush()
-    db.refresh(goal)
     if goal.status in (GoalStatus.cancelled, GoalStatus.deferred):
         return
     tasks = [t for t in goal.tasks if t.status != TaskStatus.cancelled]
-    has_work = bool(db.scalar(select(func.count(WorkLogItem.id)).where(WorkLogItem.goal_id == goal.id)))
+    has_work = db.exists(WorkLogItem, {"goal_id": goal.id})
     any_moved = any(t.status != TaskStatus.not_started for t in tasks)
 
     if goal.target_type == TargetType.tasks and tasks:
